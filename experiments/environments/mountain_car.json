@@ -1,0 +1,14 @@
+{
+  "name": "mountain_car",
+  "gym_id": "MountainCar-v0",
+  "family": "classic_control",
+  "observation_space": "continuous",
+  "action_space": "discrete",
+  "description": "Sparse-progress control task with a discrete action space.",
+  "make_kwargs": {},
+  "baseline": {
+    "seeds": [0, 1, 2, 3, 4],
+    "episodes_per_seed": 100
+  }
+}
+
