@@ -1,11 +1,8 @@
 # Experiments
 
-Environment definitions in `experiments/environments` are deliberately separate
-from algorithms. This allows the same algorithm to be run against multiple
-environments and multiple algorithms to be compared under one environment.
+Environment definitions in `experiments/environments` are deliberately separate from algorithms. This allows the same algorithm to be run against multiple environments and multiple algorithms to be compared under one environment.
 
-Each run writes a `metadata.json` file and an `episodes.csv` file. The episode
-schema is:
+Each run writes a `metadata.json` file and an `episodes.csv` file. The episode schema is:
 
 | Column | Meaning |
 | --- | --- |
@@ -21,10 +18,6 @@ schema is:
 | `terminated` | Whether the task reached a terminal state |
 | `truncated` | Whether an external limit ended the episode |
 
-Future algorithm runners should preserve this schema. Algorithm-specific data,
-such as losses or epsilon values, can go in a separate `training.csv` rather
-than making the common episode data inconsistent.
+Future episodic algorithm runners should preserve this schema. Algorithm-specific data, such as losses or epsilon values, can go in a separate `training.csv` rather than making the common episode data inconsistent. Non-episodic problems such as bandits should record their natural interaction steps in a topic-specific CSV instead of inventing artificial episodes.
 
-Comparisons should use several seeds, the same evaluation budget, and the exact
-environment configuration recorded by the run.
-
+Comparisons should use several seeds, the same evaluation budget, and the exact environment configuration recorded by the run.

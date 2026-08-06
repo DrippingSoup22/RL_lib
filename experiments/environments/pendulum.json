@@ -1,0 +1,13 @@
+{
+  "name": "pendulum",
+  "gym_id": "Pendulum-v1",
+  "family": "classic_control",
+  "observation_space": "continuous",
+  "action_space": "continuous",
+  "description": "Small continuous-state, continuous-action control task.",
+  "make_kwargs": {},
+  "baseline": {
+    "seeds": [0, 1, 2, 3, 4],
+    "episodes_per_seed": 100
+  }
+}

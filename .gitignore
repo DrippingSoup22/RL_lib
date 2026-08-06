@@ -22,4 +22,5 @@ videos/
 # Editors and operating systems
 .idea/
 .vscode/
+.zed/
 .DS_Store

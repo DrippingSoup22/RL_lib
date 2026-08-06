@@ -50,8 +50,7 @@ def load_environment(path: Path) -> EnvironmentConfig:
 def load_environments(name: str | None = None) -> list[EnvironmentConfig]:
     """Load all environment definitions, or the one with the requested name."""
     configs = [
-        load_environment(path)
-        for path in sorted(ENVIRONMENT_DIR.glob("*.json"))
+        load_environment(path) for path in sorted(ENVIRONMENT_DIR.glob("*.json"))
     ]
     if name is None:
         return configs

@@ -23,4 +23,3 @@ def test_configured_environment_can_step(config) -> None:
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
     assert isinstance(next_info, dict)
-

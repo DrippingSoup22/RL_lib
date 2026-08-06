@@ -17,7 +17,9 @@ src/rl_lib/
 ├── evaluation/       # Evaluation loops and metrics
 └── models/           # Reusable function approximators
 
-experiments/          # Environment configs and executable comparisons
+experiments/
+├── environments/     # Shared Gymnasium environment definitions
+└── runners/          # Generic baseline, rendering, recording, and plotting tools
 results/              # Curated summaries, plots, and conclusions
 runs/                 # Generated raw metrics and checkpoints (ignored)
 docs/                 # Concise architecture and workflow documentation
@@ -44,19 +46,45 @@ python -m pip install -e ".[experiments,dev]"
 Run the test suite with:
 
 ```bash
-pytest
+make test
+```
+
+The Makefile always uses the project's WSL virtual environment, so it also
+works when invoked from Zed without activating the environment first. Useful
+development commands include:
+
+```bash
+make help
+make unit
+make integration
+make test TEST=tests/unit/test_my_algorithm.py
+make check
 ```
 
 Before any algorithms are implemented, validate the configured environments and
 the result pipeline with a random-policy baseline:
 
 ```bash
-python -m experiments.random_baseline
-python -m experiments.plot_results runs/random_baseline/<run-id>
+make baseline
+make baseline ENV=frozen_lake
+make watch ENV=frozen_lake EPISODES=3
+make record ENV=cart_pole
+make plot RUN_DIR=runs/random_baseline/<run-id>
 ```
 
-The first command prints the exact run directory. The second creates a report
-under `results/random_baseline/<run-id>` by default.
+The baseline command prints the exact run directory. The plot command creates a
+report under `results/random_baseline/<run-id>` by default.
+
+The configured tasks progress from deterministic tabular control through
+stochastic transitions, continuous observations, and continuous actions. See
+[`experiments/README.md`](experiments/README.md) for the short progression and
+why MuJoCo is postponed until its extra complexity is useful.
+
+New experiment runners can be launched without adding another Make target:
+
+```bash
+make experiment MODULE=experiments.runners.random_baseline ARGS="--environment frozen_lake"
+```
 
 ## Design rules
 

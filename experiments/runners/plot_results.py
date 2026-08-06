@@ -53,13 +53,12 @@ def write_environment_result(
         "std_return",
         "mean_length",
     )
-    with (output_dir / "summary.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as file:
+    with (output_dir / "summary.csv").open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=summary_fields)
         writer.writeheader()
         for algorithm, algorithm_rows in sorted(by_algorithm.items()):
             returns = [row["return"] for row in algorithm_rows]
+            mean_length = statistics.fmean(row["length"] for row in algorithm_rows)
             writer.writerow(
                 {
                     "environment": environment,
@@ -68,9 +67,7 @@ def write_environment_result(
                     "episodes": len(algorithm_rows),
                     "mean_return": f"{statistics.fmean(returns):.6g}",
                     "std_return": f"{statistics.pstdev(returns):.6g}",
-                    "mean_length": f"{statistics.fmean(
-                        row['length'] for row in algorithm_rows
-                    ):.6g}",
+                    "mean_length": f"{mean_length:.6g}",
                 }
             )
 
