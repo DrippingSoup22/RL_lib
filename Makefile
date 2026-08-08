@@ -2,7 +2,7 @@ VENV ?= /home/daniele/.venvs/rl-lib
 PYTHON ?= $(VENV)/bin/python
 
 # Optional command-line values, for example:
-#   make test TEST=tests/unit/test_q_learning.py
+#   make test TEST=tests/algorithms/test_q_learning.py
 #   make experiment MODULE=experiments.runners.random_baseline ARGS="--environment frozen_lake"
 TEST ?=
 PYTEST_ARGS ?=
@@ -29,7 +29,7 @@ test: ## Run tests; optionally set TEST=path and PYTEST_ARGS="...".
 	$(PYTHON) -m pytest $(TEST) $(PYTEST_ARGS)
 
 unit: ## Run the fast unit tests.
-	$(PYTHON) -m pytest tests/unit $(PYTEST_ARGS)
+	$(PYTHON) -m pytest tests --ignore=tests/integration $(PYTEST_ARGS)
 
 integration: ## Run the Gymnasium integration tests.
 	$(PYTHON) -m pytest tests/integration $(PYTEST_ARGS)

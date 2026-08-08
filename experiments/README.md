@@ -82,22 +82,97 @@ example, this is equivalent to `make baseline ENV=frozen_lake`:
 make experiment MODULE=experiments.runners.random_baseline ARGS="--environment frozen_lake"
 ```
 
-The epsilon-greedy experiment compares three initial action values against three
-epsilon values in a 3-by-3 convergence grid:
+Bandit metric definitions and the experiments that use them are documented in
+[`bandits/README.md`](bandits/README.md).
+
+The epsilon-greedy experiment compares neutral, mildly optimistic, and strongly
+optimistic initial action values. For each initial value, it contrasts greedy
+action selection (`epsilon=0`) with low (`epsilon=0.01`) and conventional
+(`epsilon=0.1`) persistent exploration:
 
 ```bash
-make experiment MODULE=experiments.bandits.exp_EpsilonGreedyBandits
+make experiment MODULE=experiments.bandits.epsilon_stationary
 ```
 
-It uses deterministic rewards by default. The same experiment can use stationary
-stochastic rewards without duplicating the runner:
+It uses the standard stationary stochastic test bed by default: true action
+values and reward noise both have unit standard deviation. Deterministic rewards
+remain useful for inspecting sample-average updates in isolation:
 
 ```bash
-make experiment MODULE=experiments.bandits.exp_EpsilonGreedyBandits ARGS="--reward-std 1"
+make experiment MODULE=experiments.bandits.epsilon_stationary ARGS="--reward-std 0"
 ```
 
-It writes per-step data, a summary, metadata, and `epsilon_greedy_grid.png`
-under `runs/bandits/epsilon_greedy/<run-id>/`.
+The figure mirrors the UCB experiment's outcome measures—mean reward,
+optimal-action rate, and value-estimation error—while using one column per
+initial value. Shaded regions are approximate 95% confidence intervals across
+runs. The run writes per-step data, a summary, metadata, and
+`epsilon_greedy_grid.png` under `runs/bandits/epsilon_greedy/<run-id>/`.
+
+The nonstationary epsilon-greedy experiment gives every true action value an
+independent Gaussian random walk. It compares the sample-average update against
+a constant step size while keeping the environment and agent seeds paired:
+
+```bash
+make experiment MODULE=experiments.bandits.epsilon_nonstationary
+```
+
+The defaults compare epsilon values `0`, `0.01`, and `0.1` against the
+sample-average update and constant step sizes `0.01` and `0.1`. They use drift
+standard deviation `0.01`, 3,000 interactions, and 200 independent runs. The
+3-by-3 figure uses one epsilon per column and one metric per row, with shared
+row scales and consistent update-rule colors. It writes per-step data, a
+final-step summary, metadata, and
+`nonstationary_epsilon_greedy.png` under
+`runs/bandits/nonstationary_epsilon_greedy/<run-id>/`. Epsilon values and step
+sizes can be changed without editing the runner, for example:
+
+```bash
+make experiment MODULE=experiments.bandits.epsilon_nonstationary ARGS="--epsilons 0.01 0.05 0.1 --constant-step-sizes 0.02 0.1"
+```
+
+The figure shows pseudo-regret, optimal-action rate, and estimation MSE using a
+100-step rolling mean by default. Smoothing is applied independently to every
+run before confidence intervals are calculated; CSV measurements remain raw.
+Use `--smoothing-window 1` for an unsmoothed figure.
+
+The UCB experiment compares a forced-initialization greedy baseline (`c=0`)
+with moderate (`c=1`) and stronger (`c=2`) confidence bonuses:
+
+```bash
+make experiment MODULE=experiments.bandits.ucb_stationary
+```
+
+It uses stationary stochastic rewards by default because deterministic rewards
+make every estimate exact after UCB's first visit to each arm. The initial value
+is fixed at zero: with forced first visits and sample-average updates, changing
+it cannot affect the trajectory. Custom exploration constants can be supplied
+without changing the runner:
+
+```bash
+make experiment MODULE=experiments.bandits.ucb_stationary ARGS="--exploration-constants 0 0.5 1 2"
+```
+
+The run writes per-step data, a summary, metadata, and `ucb_c_sweep.png` under
+`runs/bandits/ucb_greedy/<run-id>/`. It uses the same bandit evaluator and
+confidence-interval convention as the epsilon-greedy experiment.
+
+The nonstationary UCB experiment applies the same `c`-by-update-rule grid used
+for nonstationary epsilon-greedy:
+
+```bash
+make experiment MODULE=experiments.bandits.ucb_nonstationary
+```
+
+Its columns use cumulative-count UCB constants `0`, `1`, and `2`; each panel
+compares sample-average estimates with constant step sizes `0.01` and `0.1`.
+Rows show pseudo-regret, optimal-action rate, and estimation MSE. Defaults are
+3,000 interactions, 200 runs, and a 100-step rolling visualization; raw CSV
+measurements remain unsmoothed.
+
+This is intentionally standard UCB evaluated under drift. Constant step sizes
+help observed value estimates track changes, but the UCB confidence counts are
+not forgotten. It is a baseline for a later discounted or sliding-window UCB,
+not a fully nonstationary confidence rule.
 
 Future episodic Gymnasium runners should emit the same `episodes.csv` columns
 described in `docs/experiments.md`. Non-episodic experiments such as bandits use

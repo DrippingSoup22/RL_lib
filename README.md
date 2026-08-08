@@ -18,6 +18,7 @@ src/rl_lib/
 └── models/           # Reusable function approximators
 
 experiments/
+├── bandits/          # Bandit environments, shared evaluation, and comparisons
 ├── environments/     # Shared Gymnasium environment definitions
 └── runners/          # Generic baseline, rendering, recording, and plotting tools
 results/              # Curated summaries, plots, and conclusions
@@ -25,8 +26,10 @@ runs/                 # Generated raw metrics and checkpoints (ignored)
 docs/                 # Concise architecture and workflow documentation
 
 tests/
-├── unit/             # Fast tests for individual library components
-└── integration/      # Algorithms interacting with environments
+├── algorithms/       # Fast tests for learning algorithms
+├── environments/     # Fast tests for environments and their configuration
+├── experiments/      # Deterministic tests for experiment measurement pipelines
+└── integration/      # Components interacting in complete workflows
 ```
 
 `src/rl_lib` is the installable library. Experiments may import it, but the
@@ -57,7 +60,7 @@ development commands include:
 make help
 make unit
 make integration
-make test TEST=tests/unit/test_my_algorithm.py
+make test TEST=tests/algorithms/test_my_algorithm.py
 make check
 ```
 
@@ -95,8 +98,10 @@ make experiment MODULE=experiments.runners.random_baseline ARGS="--environment f
   ignored run directories.
 - Keep generated output in `runs`; commit only selected summaries and figures
   to `results`.
-- Mirror library modules under `tests/unit`; reserve `tests/integration` for
-  end-to-end environment interactions.
+- Group fast tests by subject under directories such as `tests/algorithms` and
+  `tests/environments`; reserve `tests/integration` for end-to-end interactions.
 
 See [`docs/architecture.md`](docs/architecture.md) for the boundaries and
-[`docs/experiments.md`](docs/experiments.md) for the experiment contract.
+[`docs/experiments.md`](docs/experiments.md) for the experiment contract. The
+bandit metric definitions are collected in
+[`experiments/bandits/README.md`](experiments/bandits/README.md).

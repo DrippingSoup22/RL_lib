@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from rl_lib.algorithms.tabular.EpsilonGreedyBandits import EpsilonGreedyBandits
+from rl_lib.algorithms.tabular.epsilon_greedy_bandits import EpsilonGreedyBandits
 
 
 def test_initial_estimates_and_counts() -> None:
@@ -39,6 +39,30 @@ def test_update_computes_incremental_sample_average() -> None:
     np.testing.assert_array_equal(agent.estimates[[0, 2]], [0.0, 0.0])
 
 
+def test_update_uses_constant_step_size_when_configured() -> None:
+    agent = EpsilonGreedyBandits(k=3, step_size=0.5, seed=42)
+
+    for reward in (2.0, 4.0, 6.0):
+        agent.update(action=1, reward=reward)
+
+    assert agent.counts[1] == 3
+    assert agent.estimates[1] == pytest.approx(4.25)
+    np.testing.assert_array_equal(agent.estimates[[0, 2]], [0.0, 0.0])
+
+
+def test_constant_step_size_retains_part_of_initial_estimate() -> None:
+    agent = EpsilonGreedyBandits(
+        k=3,
+        initial_value=10.0,
+        step_size=0.25,
+        seed=42,
+    )
+
+    agent.update(action=1, reward=2.0)
+
+    assert agent.estimates[1] == pytest.approx(8.0)
+
+
 def test_greedy_policy_selects_unique_best_action() -> None:
     agent = EpsilonGreedyBandits(k=3, epsilon=0.0, seed=42)
     agent.estimates[:] = [1.0, 3.0, 2.0]
@@ -74,6 +98,12 @@ def test_invalid_number_of_actions_is_rejected() -> None:
 def test_invalid_epsilon_is_rejected(epsilon: float) -> None:
     with pytest.raises(ValueError, match="epsilon must be between"):
         EpsilonGreedyBandits(k=3, epsilon=epsilon)
+
+
+@pytest.mark.parametrize("step_size", [-0.1, 0.0, 1.1, np.nan, np.inf])
+def test_invalid_step_size_is_rejected(step_size: float) -> None:
+    with pytest.raises(ValueError, match="step_size must be between"):
+        EpsilonGreedyBandits(k=3, step_size=step_size)
 
 
 @pytest.mark.parametrize("action", [-1, 3])

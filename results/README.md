@@ -7,5 +7,8 @@ The random baseline is the first reference point. As algorithms are added, each
 environment will receive a short report linking its configuration, aggregate
 CSV data, figures, and source run IDs.
 
-See `docs/results.md` for the promotion rules.
+Current reports:
 
+- [Bandit experiments](bandits/README.md)
+
+See `docs/results.md` for the promotion rules.

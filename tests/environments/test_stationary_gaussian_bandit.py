@@ -36,6 +36,16 @@ def test_optimal_action_has_largest_action_value() -> None:
     assert environment.optimal_action == expected_action
 
 
+def test_invalid_number_of_actions_is_rejected() -> None:
+    with pytest.raises(ValueError, match="k must be at least"):
+        StationaryGaussianBandit(k=0)
+
+
+def test_negative_reward_standard_deviation_is_rejected() -> None:
+    with pytest.raises(ValueError, match="reward_std must be non-negative"):
+        StationaryGaussianBandit(k=3, reward_std=-0.1)
+
+
 @pytest.mark.parametrize("action", [-1, 3])
 def test_invalid_action_is_rejected(action: int) -> None:
     environment = StationaryGaussianBandit(k=3, seed=42)
