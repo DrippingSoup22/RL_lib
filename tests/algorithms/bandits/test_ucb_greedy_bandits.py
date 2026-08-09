@@ -1,3 +1,5 @@
+"""Tests for the UCB bandit agent."""
+
 import numpy as np
 import pytest
 
