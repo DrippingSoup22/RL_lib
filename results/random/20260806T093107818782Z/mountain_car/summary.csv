@@ -1,2 +1,0 @@
-environment,algorithm,seeds,episodes,mean_return,std_return,mean_length
-mountain_car,random,5,500,-200,0,200

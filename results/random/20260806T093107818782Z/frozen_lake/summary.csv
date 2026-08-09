@@ -1,2 +1,0 @@
-environment,algorithm,seeds,episodes,mean_return,std_return,mean_length
-frozen_lake,random,5,500,0.01,0.0994987,7.25

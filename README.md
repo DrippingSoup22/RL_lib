@@ -1,107 +1,42 @@
 # RL Lib
 
-A small reinforcement-learning library for implementing algorithms from first
-principles, comparing them in Gymnasium environments, and reusing them in future
-projects.
+A small reinforcement-learning library that implements core algorithms from
+first principles and validates them with Gymnasium experiments.
 
-## Repository layout
+## Scope
+
+| Family | Algorithms |
+| --- | --- |
+| Bandits | Epsilon-greedy and UCB; stationary and nonstationary |
+| Monte Carlo | First/every visit prediction and epsilon-greedy control |
+| Temporal difference | TD(0), SARSA, and Q-learning |
+| Function approximation | Semi-gradient SARSA and Q-learning |
+| Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
+
+Only bandits and Monte Carlo are implemented currently. See
+[`docs/roadmap.md`](docs/roadmap.md) for the planned order.
+
+## Structure
 
 ```text
-src/rl_lib/
-├── algorithms/       # Learning algorithms, grouped by family
-│   ├── actor_critic/
-│   ├── policy_gradient/
-│   ├── tabular/
-│   └── value_based/
-├── data/             # Trajectories, replay buffers, and batch structures
-├── evaluation/       # Evaluation loops and metrics
-└── models/           # Reusable function approximators
-
-experiments/
-├── bandits/          # Bandit environments, shared evaluation, and comparisons
-├── environments/     # Shared Gymnasium environment definitions
-└── runners/          # Generic baseline, rendering, recording, and plotting tools
-results/              # Curated summaries, plots, and conclusions
-runs/                 # Generated raw metrics and checkpoints (ignored)
-docs/                 # Concise architecture and workflow documentation
-
-tests/
-├── algorithms/       # Fast tests for learning algorithms
-├── environments/     # Fast tests for environments and their configuration
-├── experiments/      # Deterministic tests for experiment measurement pipelines
-└── integration/      # Components interacting in complete workflows
+src/rl_lib/       reusable algorithms, policies, and trajectory data
+experiments/      one Gymnasium runner per implemented family
+tests/            small deterministic algorithm and environment tests
+runs/             generated metrics and reports (ignored by Git)
 ```
 
-`src/rl_lib` is the installable library. Experiments may import it, but the
-library never imports project-level experiments or results.
-
-## Setup
-
-Create and activate a virtual environment, then install the project in editable
-mode with its experiment and development tools:
+## Setup and checks
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -e ".[experiments,dev]"
-```
-
-Run the test suite with:
-
-```bash
-make test
-```
-
-The Makefile always uses the project's WSL virtual environment, so it also
-works when invoked from Zed without activating the environment first. Useful
-development commands include:
-
-```bash
-make help
-make unit
-make integration
-make test TEST=tests/algorithms/test_my_algorithm.py
 make check
 ```
 
-Before any algorithms are implemented, validate the configured environments and
-the result pipeline with a random-policy baseline:
+Run the implemented experiments with:
 
 ```bash
-make baseline
-make baseline ENV=frozen_lake
-make watch ENV=frozen_lake EPISODES=3
-make record ENV=cart_pole
-make plot RUN_DIR=runs/random_baseline/<run-id>
+make experiment MODULE=experiments.bandits.run
+make experiment MODULE=experiments.monte_carlo.run
 ```
 
-The baseline command prints the exact run directory. The plot command creates a
-report under `results/random_baseline/<run-id>` by default.
-
-The configured tasks progress from deterministic tabular control through
-stochastic transitions, continuous observations, and continuous actions. See
-[`experiments/README.md`](experiments/README.md) for the short progression and
-why MuJoCo is postponed until its extra complexity is useful.
-
-New experiment runners can be launched without adding another Make target:
-
-```bash
-make experiment MODULE=experiments.runners.random_baseline ARGS="--environment frozen_lake"
-```
-
-## Design rules
-
-- Keep algorithms independent of a particular Gymnasium environment.
-- Keep transition and rollout storage in `data`, separate from learning logic.
-- Add abstractions only after a concrete algorithm needs them.
-- Keep reusable model definitions in `models`; trained weights belong in
-  ignored run directories.
-- Keep generated output in `runs`; commit only selected summaries and figures
-  to `results`.
-- Group fast tests by subject under directories such as `tests/algorithms` and
-  `tests/environments`; reserve `tests/integration` for end-to-end interactions.
-
-See [`docs/architecture.md`](docs/architecture.md) for the boundaries and
-[`docs/experiments.md`](docs/experiments.md) for the experiment contract. The
-bandit metric definitions are collected in
-[`experiments/bandits/README.md`](experiments/bandits/README.md).
+Each run writes `metrics.csv`, `metadata.json`, and `report.md` under `runs/`.

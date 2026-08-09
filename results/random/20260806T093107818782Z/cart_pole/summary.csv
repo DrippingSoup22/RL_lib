@@ -1,2 +1,0 @@
-environment,algorithm,seeds,episodes,mean_return,std_return,mean_length
-cart_pole,random,5,500,21.878,11.2908,21.878

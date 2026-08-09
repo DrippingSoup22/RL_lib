@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rl-lib"
 version = "0.1.0"
-description = "Lightweight reinforcement-learning algorithms and experiment tools"
+description = "Compact reinforcement-learning algorithms from first principles"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,8 +15,6 @@ dependencies = [
 [project.optional-dependencies]
 experiments = [
     "gymnasium[classic-control]",
-    "matplotlib",
-    "pillow",
 ]
 dev = [
     "pytest",

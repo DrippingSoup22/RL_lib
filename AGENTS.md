@@ -1,32 +1,40 @@
 # Project guidance
 
-This is a reinforcement-learning study project.
+This is a compact educational reinforcement-learning library. Its goal is broad,
+clear algorithm coverage without framework-level complexity.
 
-## Development environment
+## Scope
 
-- The project runs in WSL using the virtual environment at
-  `/home/daniele/.venvs/rl-lib`.
-- Zed's Codex extension does not inherit virtual-environment activation from
-  the integrated terminal. Run Python tools through the virtual environment's
-  interpreter explicitly.
-- Run tests with
-  `/home/daniele/.venvs/rl-lib/bin/python -m pytest`.
-- Run linting with
-  `/home/daniele/.venvs/rl-lib/bin/python -m ruff check .`.
-- Check formatting with
-  `/home/daniele/.venvs/rl-lib/bin/python -m ruff format --check .`.
-- The repository is opened from
-  `/mnt/c/Users/danie/SharedFolder/RL_lib`.
-- Prefer the equivalent Makefile shortcuts (`make test`, `make lint`,
-  `make format-check`, and `make check`) for routine work. The Makefile uses
-  the same explicit WSL virtual-environment interpreter.
+- Bandits: epsilon-greedy and UCB, stationary and nonstationary.
+- Monte Carlo: first/every visit prediction and epsilon-greedy control.
+- Temporal difference: TD(0), SARSA, and Q-learning.
+- Function approximation: semi-gradient SARSA and Q-learning.
+- Policy gradients: REINFORCE with baseline, A2C, A3C, TRPO, and PPO.
 
-When working on algorithms:
+Do not implement algorithms outside the user's current request.
 
-- Explain the mathematical idea before proposing code.
-- Do not implement an entire algorithm unless explicitly requested.
-- Let the user write the central update rule when the goal is learning.
-- Review mathematical correctness separately from code quality.
-- Prefer small deterministic tests before Gymnasium experiments.
-- Distinguish implementation bugs from hyperparameter problems.
-- Keep reusable code in `src/rl_lib` and experiment definitions outside it.
+## Approach
+
+- Explain the mathematical update before code.
+- Keep reusable algorithms in `src/rl_lib` and Gymnasium experiments in
+  `experiments`.
+- Prefer direct implementations over speculative abstractions.
+- Add only small deterministic tests for update correctness, validation, and
+  environment compatibility. Do not unit-test report or CSV plumbing.
+- Treat a multi-seed Gymnasium experiment as the end-to-end validation.
+- Keep each experiment to one runner and write only `metrics.csv`,
+  `metadata.json`, and `report.md`.
+- Distinguish mathematical bugs, implementation bugs, and hyperparameter issues.
+
+## Commands
+
+The WSL virtual environment is `/home/daniele/.venvs/rl-lib`.
+
+```bash
+make test
+make lint
+make format-check
+make check
+```
+
+These commands use the virtual environment explicitly and work from Zed.
