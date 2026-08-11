@@ -21,7 +21,7 @@ class FirstVisitMonteCarloPrediction:
         self.number_of_states = number_of_states
         self.discount = discount
         self.visit_counts = np.zeros(number_of_states, dtype=int)
-        self.values = np.zeros(number_of_states, dtype=float)
+        self.V = np.zeros(number_of_states, dtype=float)
 
     def update(self, episode: Episode) -> None:
         """Update estimates with an entire episode of discounted rewards"""
@@ -37,9 +37,9 @@ class FirstVisitMonteCarloPrediction:
             if state not in visited_states:
                 visited_states.add(state)
                 self.visit_counts[state] += 1
-                self.values[state] += (
-                    episode_return - self.values[state]
-                ) / self.visit_counts[state]
+                self.V[state] += (episode_return - self.V[state]) / self.visit_counts[
+                    state
+                ]
 
 
 class EveryVisitMonteCarloPrediction:
@@ -58,7 +58,7 @@ class EveryVisitMonteCarloPrediction:
         self.number_of_states = number_of_states
         self.discount = discount
         self.visit_counts = np.zeros(number_of_states, dtype=int)
-        self.values = np.zeros(number_of_states, dtype=float)
+        self.V = np.zeros(number_of_states, dtype=float)
 
     def update(self, episode: Episode) -> None:
         """Update estimates with an entire episode of discounted rewards"""
@@ -70,6 +70,4 @@ class EveryVisitMonteCarloPrediction:
             if not 0 <= state < self.number_of_states:
                 raise ValueError("State value not valid!")
             self.visit_counts[state] += 1
-            self.values[state] += (
-                episode_return - self.values[state]
-            ) / self.visit_counts[state]
+            self.V[state] += (episode_return - self.V[state]) / self.visit_counts[state]

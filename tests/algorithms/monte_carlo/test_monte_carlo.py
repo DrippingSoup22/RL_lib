@@ -33,8 +33,8 @@ def test_first_and_every_visit_prediction_count_different_samples() -> None:
     episode = repeated_state_episode()
     first.update(episode)
     every_visit.update(episode)
-    assert first.values[0] == pytest.approx(4.0)
-    assert every_visit.values[0] == pytest.approx(3.5)
+    assert first.V[0] == pytest.approx(4.0)
+    assert every_visit.V[0] == pytest.approx(3.5)
     assert first.visit_counts[0] == 1
     assert every_visit.visit_counts[0] == 2
 
@@ -49,7 +49,7 @@ def test_control_updates_q_and_improves_policy(
     control = control_class(2, 2, epsilon=0.2, seed=0)
     control.update(repeated_state_episode())
     assert control.visit_counts[0, 0] == expected_count
-    assert control.action_values[0, 0] > control.action_values[0, 1]
+    assert control.Q[0, 0] > control.Q[0, 1]
     np.testing.assert_allclose(control.policy.probabilities[0], [0.9, 0.1])
 
 

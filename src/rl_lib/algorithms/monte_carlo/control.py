@@ -36,7 +36,7 @@ class FirstVisitMonteCarloControl:
             seed,
         )
 
-        self.action_values = np.zeros(
+        self.Q = np.zeros(
             (number_of_states, number_of_actions),
             dtype=float,
         )
@@ -69,15 +69,15 @@ class FirstVisitMonteCarloControl:
                 first_visited_pairs.add(pair)
                 first_visited_states.add(state)
                 self.visit_counts[state, action] += 1
-                self.action_values[state, action] += (
-                    episode_return - self.action_values[state, action]
+                self.Q[state, action] += (
+                    episode_return - self.Q[state, action]
                 ) / self.visit_counts[state, action]
 
         """----- Monte Carlo policy improvement -----"""
 
         for state in first_visited_states:
             probabilities = epsilon_soft_probabilities(
-                self.action_values[state],
+                self.Q[state],
                 self.epsilon,
             )
 
@@ -117,7 +117,7 @@ class EveryVisitMonteCarloControl:
             seed,
         )
 
-        self.action_values = np.zeros(
+        self.Q = np.zeros(
             (number_of_states, number_of_actions),
             dtype=float,
         )
@@ -146,15 +146,15 @@ class EveryVisitMonteCarloControl:
 
             visited_states.add(state)
             self.visit_counts[state, action] += 1
-            self.action_values[state, action] += (
-                episode_return - self.action_values[state, action]
+            self.Q[state, action] += (
+                episode_return - self.Q[state, action]
             ) / self.visit_counts[state, action]
 
         """----- Monte Carlo policy improvement -----"""
 
         for state in visited_states:
             probabilities = epsilon_soft_probabilities(
-                self.action_values[state],
+                self.Q[state],
                 self.epsilon,
             )
 
