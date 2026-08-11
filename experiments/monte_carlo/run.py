@@ -213,7 +213,7 @@ def run_prediction(
                     "algorithm": name,
                     "checkpoint": 100,
                     "state": state,
-                    "value": float(estimator.values[state]),
+                    "value": float(estimator.V[state]),
                     "visits": int(estimator.visit_counts[state]),
                     "mean_return": "",
                     "return_std": "",
@@ -352,7 +352,7 @@ def run_control(
 
                 evaluation_policy = partial(
                     greedy_action,
-                    agent.action_values,
+                    agent.Q,
                     np.random.default_rng(seed + checkpoint),
                 )
                 seed_returns = []
@@ -412,7 +412,7 @@ def run_control(
                         / f"{name}_checkpoint_{checkpoint:03d}.gif",
                         environment=environment,
                         encode_observation=encode_observation,
-                        action_values=agent.action_values,
+                        action_values=agent.Q,
                         seeds=recording_seeds,
                         frame_duration_ms=frame_duration,
                         terminal_duration_ms=terminal_duration,

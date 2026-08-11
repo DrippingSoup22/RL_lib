@@ -22,6 +22,7 @@ Do not implement algorithms outside the user's current request.
 - Add only small deterministic tests for update correctness, validation, and
   environment compatibility. Do not unit-test dashboard or CSV plumbing.
 - Treat a multi-seed Gymnasium experiment as the end-to-end validation.
+- Run the relevant component tests before starting an end-to-end experiment.
 - Keep each experiment to one runner. Write raw `metrics.csv` and
   `metadata.json`, an automatic `summary.html`, and only the selected behavior
   recordings.

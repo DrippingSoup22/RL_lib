@@ -4,7 +4,7 @@
 | ---: | --- | --- | --- |
 | 1 | Stationary/nonstationary epsilon-greedy and UCB bandits | Stationary / drifting Gaussian bandit | Implemented |
 | 2 | First/every visit Monte Carlo prediction and control | `Blackjack-v1` / `Taxi-v4` | Implemented |
-| 3 | TD(0), SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Planned |
+| 3 | TD(0), SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Implemented |
 | 4 | Semi-gradient SARSA and Q-learning | `MountainCar-v0` / `Acrobot-v1` | Planned |
 | 5 | REINFORCE with baseline and A2C | `CartPole-v1` / `Acrobot-v1` | Planned |
 | 6 | A3C, PPO, TRPO | `CartPole-v1` / `Pendulum-v1` | Planned |

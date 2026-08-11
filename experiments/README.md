@@ -8,7 +8,15 @@ make experiment MODULE=experiments.bandits.run
 make experiment MODULE=experiments.monte_carlo.run
 make experiment MODULE=experiments.monte_carlo.run ARGS="--environment Taxi-v4"
 make experiment MODULE=experiments.monte_carlo.run ARGS="--environment Taxi-v4 --preset quick"
+make experiment MODULE=experiments.temporal_difference.run
+make experiment MODULE=experiments.temporal_difference.run ARGS="--environment FrozenLake-v1"
+make experiment MODULE=experiments.temporal_difference.run ARGS="--preset quick"
 ```
+
+The temporal-difference runner evaluates TD(0) prediction, SARSA, and Q-learning.
+It uses `CliffWalking-v1` as the primary environment and configurable generated
+`FrozenLake-v1` maps as the challenge. Compared control algorithms share maps,
+training seeds, and frozen greedy evaluation seeds.
 
 The Monte Carlo runner accepts Blackjack and zero-based Gymnasium environments
 with discrete observation and action spaces. Blackjack keeps its small custom

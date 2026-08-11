@@ -13,7 +13,8 @@ first principles and validates them with Gymnasium experiments.
 | Function approximation | Semi-gradient SARSA and Q-learning |
 | Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
 
-Only bandits and Monte Carlo are implemented currently. See
+Bandits, Monte Carlo, and tabular temporal-difference methods are implemented
+currently. See
 [`docs/roadmap.md`](docs/roadmap.md) for the planned order.
 
 ## Structure
@@ -38,6 +39,8 @@ Run the implemented experiments with:
 make experiment MODULE=experiments.bandits.run
 make experiment MODULE=experiments.monte_carlo.run
 make experiment MODULE=experiments.monte_carlo.run ARGS="--environment Taxi-v4"
+make experiment MODULE=experiments.temporal_difference.run
+make experiment MODULE=experiments.temporal_difference.run ARGS="--environment FrozenLake-v1"
 ```
 
 Monte Carlo runs use environment-specific `standard` budgets. Add
