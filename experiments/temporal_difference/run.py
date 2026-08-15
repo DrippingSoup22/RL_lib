@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from gymnasium.envs.toy_text.frozen_lake import generate_random_map
-from PIL import Image, ImageDraw
 
+from experiments.common import (
+    EVALUATION_CHECKPOINTS,
+    RECORDING_CHECKPOINTS,
+    annotated_frame,
+    checkpoint_episode_target,
+    create_run_directory,
+    write_csv,
+    write_metadata,
+)
 from experiments.summary import SummaryMedia, SummaryTable, write_summary
 from rl_lib.algorithms.temporal_difference import (
     SARSA,
-    Q_learning,
+    QLearning,
     TDZeroPrediction,
 )
 
-EVALUATION_CHECKPOINTS = (0, 25, 50, 75, 100)
-RECORDING_CHECKPOINTS = (25, 50, 75, 100)
 CSV_FIELDS = (
     "phase",
     "algorithm",
@@ -179,7 +182,7 @@ def run_prediction(
 
 def train_episode(
     env: gym.Env,
-    agent: SARSA | Q_learning,
+    agent: SARSA | QLearning,
     algorithm: str,
     seed: int,
 ) -> None:
@@ -257,14 +260,6 @@ def action_name(environment: str, action: int) -> str:
     return ("left", "down", "right", "up")[action]
 
 
-def annotated_frame(frame: np.ndarray, label: str) -> Image.Image:
-    image = Image.fromarray(frame)
-    canvas = Image.new("RGB", (image.width, image.height + 32), "white")
-    canvas.paste(image, (0, 0))
-    ImageDraw.Draw(canvas).text((10, image.height + 8), label, fill="black")
-    return canvas
-
-
 def record_evaluation(
     path: Path,
     environment: str,
@@ -314,15 +309,18 @@ def run_control(
     discount: float,
     epsilon: float,
     recordings_directory: Path,
+    metrics_path: Path,
+    initial_rows: list[dict[str, object]],
     recording_checkpoints: tuple[int, ...],
 ) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    algorithms: tuple[tuple[str, type[SARSA] | type[Q_learning]], ...] = (
+    rows = initial_rows.copy()
+    algorithms: tuple[tuple[str, type[SARSA] | type[QLearning]], ...] = (
         ("sarsa", SARSA),
-        ("q_learning", Q_learning),
+        ("q_learning", QLearning),
     )
     for algorithm, agent_class in algorithms:
         for seed, configuration in enumerate(configurations):
+            print(f"{algorithm}: seed {seed + 1}/{len(configurations)}", flush=True)
             env = make_environment(environment, configuration)
             agent = agent_class(
                 number_of_states,
@@ -334,10 +332,14 @@ def run_control(
             )
             completed_episodes = 0
             for checkpoint in EVALUATION_CHECKPOINTS:
-                target_episodes = (
-                    0
-                    if checkpoint == 0
-                    else max(1, round(training_episodes * checkpoint / 100))
+                target_episodes = checkpoint_episode_target(
+                    training_episodes,
+                    checkpoint,
+                )
+                print(
+                    f"  checkpoint {checkpoint}%: train to {target_episodes}, "
+                    f"then evaluate {evaluation_episodes} episodes",
+                    flush=True,
                 )
                 while completed_episodes < target_episodes:
                     train_episode(
@@ -367,6 +369,7 @@ def run_control(
                         **measurements,
                     }
                 )
+                write_csv(metrics_path, CSV_FIELDS, rows)
                 if seed == 0 and checkpoint in recording_checkpoints:
                     record_evaluation(
                         recordings_directory
@@ -475,14 +478,8 @@ def write_outputs(
     rows: list[dict[str, object]],
     metadata: dict[str, object],
 ) -> None:
-    with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    (output / "metadata.json").write_text(
-        json.dumps(metadata, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    write_csv(output / "metrics.csv", CSV_FIELDS, rows)
+    write_metadata(output / "metadata.json", metadata)
     environment = str(metadata["environment"])
     write_figures(output, environment, rows, int(metadata["number_of_states"]))
     aggregate = aggregate_control_rows(rows)
@@ -629,35 +626,11 @@ def main() -> None:
         not args.non_slippery,
         args.max_episode_steps,
     )
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    output = Path("runs/temporal_difference") / run_id
-    output.mkdir(parents=True)
+    output = create_run_directory("temporal_difference", args.environment)
     recordings = output / "recordings"
     recordings.mkdir()
-    rows = run_prediction(
-        args.environment,
-        configurations[0],
-        states,
-        prediction_episodes,
-        args.learning_rate,
-        args.discount,
-    )
-    rows.extend(
-        run_control(
-            args.environment,
-            configurations,
-            states,
-            actions,
-            training_episodes,
-            evaluation_episodes,
-            args.learning_rate,
-            args.discount,
-            args.epsilon,
-            recordings,
-            (100,) if args.preset == "quick" else RECORDING_CHECKPOINTS,
-        )
-    )
     metadata: dict[str, object] = {
+        "status": "running",
         "environment": args.environment,
         "preset": args.preset,
         "prediction_episodes": prediction_episodes,
@@ -694,8 +667,35 @@ def main() -> None:
             else None
         ),
     }
+    write_metadata(output / "metadata.json", metadata)
+    prediction_rows = run_prediction(
+        args.environment,
+        configurations[0],
+        states,
+        prediction_episodes,
+        args.learning_rate,
+        args.discount,
+    )
+    write_csv(output / "metrics.csv", CSV_FIELDS, prediction_rows)
+    rows = run_control(
+        args.environment,
+        configurations,
+        states,
+        actions,
+        training_episodes,
+        evaluation_episodes,
+        args.learning_rate,
+        args.discount,
+        args.epsilon,
+        recordings,
+        output / "metrics.csv",
+        prediction_rows,
+        (100,) if args.preset == "quick" else RECORDING_CHECKPOINTS,
+    )
     write_outputs(output, rows, metadata)
-    print(output)
+    metadata["status"] = "complete"
+    write_metadata(output / "metadata.json", metadata)
+    print(f"Complete: {output}", flush=True)
 
 
 if __name__ == "__main__":

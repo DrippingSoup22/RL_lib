@@ -1,9 +1,13 @@
+"""One-step tabular temporal-difference control algorithms."""
+
 import numpy as np
 
 from rl_lib.policies.tabular import TabularPolicy, epsilon_soft_probabilities
 
 
 class SARSA:
+    """On-policy one-step SARSA control with an epsilon-soft policy."""
+
     def __init__(
         self,
         number_of_states: int,
@@ -54,11 +58,11 @@ class SARSA:
     ) -> None:
 
         if not 0 <= state < self.number_of_states:
-            raise ValueError("State must stai inside the state table!")
+            raise ValueError("State must stay inside the state table")
         if not 0 <= action < self.number_of_actions:
-            raise ValueError("Action must stai inside the action table!")
+            raise ValueError("Action must stay inside the action table")
         if not 0 <= next_state < self.number_of_states:
-            raise ValueError("Next state must stai inside the state table!")
+            raise ValueError("Next state must stay inside the state table")
         if not terminated:
             if next_action is None:
                 raise ValueError(
@@ -83,7 +87,9 @@ class SARSA:
         self.policy.set_action_probabilities(state, probabilities)
 
 
-class Q_learning:
+class QLearning:
+    """Off-policy one-step Q-learning with epsilon-soft behavior."""
+
     def __init__(
         self,
         number_of_states: int,
@@ -151,6 +157,6 @@ class Q_learning:
         error = target - self.Q[state, action]
         self.Q[state, action] += self.learning_rate * error
 
-        # ----- Policy improvement step -----"
+        # Policy improvement step
         probabilities = epsilon_soft_probabilities(self.Q[state], self.epsilon)
         self.policy.set_action_probabilities(state, probabilities)

@@ -8,7 +8,7 @@ clear algorithm coverage without framework-level complexity.
 - Bandits: epsilon-greedy and UCB, stationary and nonstationary.
 - Monte Carlo: first/every visit prediction and epsilon-greedy control.
 - Temporal difference: TD(0), SARSA, and Q-learning.
-- Function approximation: semi-gradient SARSA and Q-learning.
+- Function approximation: semi-gradient TD(0) prediction, SARSA, and Q-learning.
 - Policy gradients: REINFORCE with baseline, A2C, A3C, TRPO, and PPO.
 
 Do not implement algorithms outside the user's current request.
@@ -18,14 +18,27 @@ Do not implement algorithms outside the user's current request.
 - Explain the mathematical update before code.
 - Keep reusable algorithms in `src/rl_lib` and Gymnasium experiments in
   `experiments`.
+- Share only mechanical runner helpers in `experiments/common.py`; keep
+  environment semantics, training, evaluation, and summaries in each family's
+  runner.
 - Prefer direct implementations over speculative abstractions.
 - Add only small deterministic tests for update correctness, validation, and
   environment compatibility. Do not unit-test dashboard or CSV plumbing.
 - Treat a multi-seed Gymnasium experiment as the end-to-end validation.
 - Run the relevant component tests before starting an end-to-end experiment.
+- The user runs tuning and standard experiments. The assistant may run only
+  smoke tests or the `quick` preset to verify experiment compatibility.
 - Keep each experiment to one runner. Write raw `metrics.csv` and
   `metadata.json`, an automatic `summary.html`, and only the selected behavior
   recordings.
+- Store Gymnasium runs under
+  `runs/<family>/<environment>/<timestamp>/`. Synthetic experiments that cover
+  several conditions in one run, such as bandits, may omit the environment
+  directory.
+- Print the output directory before work begins. For long runs, write metadata
+  before training, report algorithm/seed/checkpoint progress, and rewrite
+  `metrics.csv` after each completed checkpoint so interruption preserves
+  completed measurements.
 - Build `summary.html` deterministically from measured data. Include
   configuration, computed tables, figures, and embedded recordings, but no
   manually authored conclusions or AI-generated interpretation.
@@ -34,7 +47,7 @@ Do not implement algorithms outside the user's current request.
 - Standard experiments record frozen evaluation behavior at 25%, 50%, 75%,
   and 100% of training. Quick compatibility runs may record only 100%. Embed
   GIF or video recordings in the summary, never render normal training, and
-  never update the agent during a recording.
+  never update the agent during a recording. Tuning runs may omit recordings.
 - Start learning curves with a frozen 0% evaluation baseline when the metric is
   defined before training. Do not create a 0% behavior recording.
 - Smooth noisy learning curves for display by averaging each run before
@@ -47,6 +60,9 @@ Do not implement algorithms outside the user's current request.
 - Pair environment seeds across algorithm variants. For tabular agents, keep a
   generated MDP fixed for the whole training/evaluation run so state meanings do
   not change between episodes.
+- Keep runners CPU-first and sequential by default. Add vectorization or
+  multiprocessing only when it answers an algorithmic need or a measured
+  bottleneck justifies the extra complexity.
 - Stop interaction on either termination or truncation. TD targets bootstrap
   after truncation but not after true termination; evaluation may still count a
   truncated episode as unsuccessful.
@@ -54,7 +70,8 @@ Do not implement algorithms outside the user's current request.
 
 ## Commands
 
-The WSL virtual environment is `/home/daniele/.venvs/rl-lib`.
+The Makefile uses `python3` by default. Machine-specific interpreter overrides
+belong in the ignored `local.mk`, for example `PYTHON := /path/to/python`.
 
 ```bash
 make test
@@ -63,4 +80,4 @@ make format-check
 make check
 ```
 
-These commands use the virtual environment explicitly and work from Zed.
+These commands use the interpreter selected by the Makefile and work from Zed.

@@ -6,7 +6,7 @@ from rl_lib.data.episode import Episode, discounted_returns
 
 
 class FirstVisitMonteCarloPrediction:
-    """Monte Carlo first visit class, it estimate V for a fixed policy"""
+    """Estimate a fixed policy's state values with first-visit returns."""
 
     def __init__(
         self,
@@ -24,7 +24,7 @@ class FirstVisitMonteCarloPrediction:
         self.V = np.zeros(number_of_states, dtype=float)
 
     def update(self, episode: Episode) -> None:
-        """Update estimates with an entire episode of discounted rewards"""
+        """Update estimates from one complete episode."""
         rewards = [step.reward for step in episode.steps]
         returns = discounted_returns(rewards, self.discount)
 
@@ -43,7 +43,7 @@ class FirstVisitMonteCarloPrediction:
 
 
 class EveryVisitMonteCarloPrediction:
-    """Monte Carlo every visit class, it estimate V for a fixed policy"""
+    """Estimate a fixed policy's state values with every-visit returns."""
 
     def __init__(
         self,
@@ -61,7 +61,7 @@ class EveryVisitMonteCarloPrediction:
         self.V = np.zeros(number_of_states, dtype=float)
 
     def update(self, episode: Episode) -> None:
-        """Update estimates with an entire episode of discounted rewards"""
+        """Update estimates from one complete episode."""
         rewards = [step.reward for step in episode.steps]
         returns = discounted_returns(rewards, self.discount)
 

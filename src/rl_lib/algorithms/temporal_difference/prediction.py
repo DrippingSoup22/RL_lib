@@ -1,7 +1,11 @@
+"""One-step tabular temporal-difference prediction."""
+
 import numpy as np
 
 
 class TDZeroPrediction:
+    """Estimate a fixed policy's state values with tabular TD(0)."""
+
     def __init__(
         self,
         number_of_states: int,
@@ -11,7 +15,7 @@ class TDZeroPrediction:
     ) -> None:
 
         if number_of_states < 1:
-            raise ValueError("Number_of_states must be at least 1!")
+            raise ValueError("Number of states must be at least 1")
         if not 0 < learning_rate <= 1:
             raise ValueError("Learning rate must be in (0, 1]!")
         if not 0 <= discount <= 1:

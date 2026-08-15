@@ -1,5 +1,6 @@
-VENV ?= /home/daniele/.venvs/rl-lib
-PYTHON ?= $(VENV)/bin/python
+-include local.mk
+
+PYTHON ?= python3
 TEST ?=
 PYTEST_ARGS ?=
 MODULE ?=
@@ -7,10 +8,33 @@ ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup test coverage lint format format-check check experiment
+.PHONY: help setup test coverage lint format format-check check experiment ba mc td fa
 
 help: ## Show the available commands.
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo
+	@echo 'Experiment arguments (pass as ARGS="..."):'
+	@echo '  ba  --runs N --steps N --smoothing-window N --seed N'
+	@echo '  mc  --environment ID --preset {quick,standard}'
+	@echo '      --prediction-episodes N --training-episodes N'
+	@echo '      --evaluation-episodes N --epsilon FLOAT --seeds N'
+	@echo '  td  --environment {CliffWalking-v1,FrozenLake-v1}'
+	@echo '      --preset {quick,standard} --prediction-episodes N'
+	@echo '      --training-episodes N --evaluation-episodes N --seeds N'
+	@echo '      --learning-rate FLOAT --discount FLOAT --epsilon FLOAT'
+	@echo '      --map-size N --safe-probability FLOAT --non-slippery'
+	@echo '      --max-episode-steps N'
+	@echo '  fa  -e/--env/--environment {Acrobot-v1,MountainCar-v0}'
+	@echo '      -p/--preset {quick,tuning,standard}'
+	@echo '      -o/--opt/--optimizer {sgd,adam}'
+	@echo '      --train/--training-episodes N --eval/--evaluation-episodes N'
+	@echo '      -n/--seeds N --lr/--learning-rate FLOAT --lr-min FLOAT'
+	@echo '      --val/--validation-episodes N'
+	@echo '      --gamma/--discount FLOAT --eps/--epsilon FLOAT'
+	@echo '      --sarsa-eps-final/--sarsa-final-epsilon FLOAT'
+	@echo '      --hidden/--hidden-sizes N [N ...]'
+	@echo '      -r/--record/--recordings {none,final,checkpoints}'
+	@echo '      --diag/--diagnostics'
 
 setup: ## Install library, experiment, and development dependencies.
 	$(PYTHON) -m pip install -e ".[experiments,dev]"
@@ -35,3 +59,15 @@ check: lint format-check test ## Run all quality checks.
 experiment: ## Run MODULE=experiments.<family>.run with optional ARGS="...".
 	@test -n "$(MODULE)" || { echo 'Usage: make experiment MODULE=experiments.<family>.run ARGS="..."'; exit 2; }
 	$(PYTHON) -m $(MODULE) $(ARGS)
+
+ba: ## Run the bandit experiment with optional ARGS="...".
+	$(PYTHON) -m experiments.bandits.run $(ARGS)
+
+mc: ## Run the Monte Carlo experiment with optional ARGS="...".
+	$(PYTHON) -m experiments.monte_carlo.run $(ARGS)
+
+td: ## Run the temporal-difference experiment with optional ARGS="...".
+	$(PYTHON) -m experiments.temporal_difference.run $(ARGS)
+
+fa: ## Run the function-approximation experiment with optional ARGS="...".
+	$(PYTHON) -m experiments.function_approximation.run $(ARGS)

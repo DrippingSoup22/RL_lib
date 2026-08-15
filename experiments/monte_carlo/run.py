@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 from collections.abc import Callable
-from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -14,8 +11,16 @@ from typing import Any
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw
 
+from experiments.common import (
+    EVALUATION_CHECKPOINTS,
+    RECORDING_CHECKPOINTS,
+    annotated_frame,
+    checkpoint_episode_target,
+    create_run_directory,
+    write_csv,
+    write_metadata,
+)
 from experiments.summary import SummaryMedia, SummaryTable, write_summary
 from rl_lib.algorithms.monte_carlo import (
     EveryVisitMonteCarloControl,
@@ -27,8 +32,6 @@ from rl_lib.data.episode import Episode, EpisodeStep
 
 BLACKJACK_STATES = 32 * 11 * 2
 BLACKJACK_ACTIONS = 2
-EVALUATION_CHECKPOINTS = (0, 25, 50, 75, 100)
-RECORDING_CHECKPOINTS = (25, 50, 75, 100)
 RECORDING_SEEDS = (4, 5, 6, 7, 8)
 
 
@@ -233,14 +236,6 @@ def run_prediction(
     return rows
 
 
-def _annotated_frame(frame: np.ndarray, label: str) -> Image.Image:
-    image = Image.fromarray(frame)
-    canvas = Image.new("RGB", (image.width, image.height + 32), "white")
-    canvas.paste(image, (0, 0))
-    ImageDraw.Draw(canvas).text((10, image.height + 8), label, fill="black")
-    return canvas
-
-
 def record_evaluation(
     path: Path,
     *,
@@ -257,7 +252,7 @@ def record_evaluation(
     durations = []
     for episode, seed in enumerate(seeds, start=1):
         observation, _ = env.reset(seed=seed)
-        frames.append(_annotated_frame(env.render(), f"Episode {episode}: start"))
+        frames.append(annotated_frame(env.render(), f"Episode {episode}: start"))
         durations.append(frame_duration_ms)
         terminated = truncated = False
         step = 0
@@ -267,7 +262,7 @@ def record_evaluation(
             step += 1
             action_label = action_name(environment, action)
             frames.append(
-                _annotated_frame(
+                annotated_frame(
                     env.render(),
                     f"Episode {episode}, step {step}: action {action_label}, "
                     f"reward {float(reward):g}",
@@ -294,6 +289,49 @@ def _aggregate(values: list[float]) -> tuple[float | str, float | str]:
     return mean, std
 
 
+def _control_metric_row(
+    algorithm: str,
+    checkpoint: int,
+    checkpoint_metrics: dict[str, dict[int, list[float]]],
+    evaluation_episodes: int,
+    completed_seeds: int,
+) -> dict[str, object]:
+    mean_return, return_std = _aggregate(checkpoint_metrics["return"][checkpoint])
+    success_rate, success_rate_std = _aggregate(
+        checkpoint_metrics["success"][checkpoint]
+    )
+    mean_length, length_std = _aggregate(checkpoint_metrics["length"][checkpoint])
+    truncation_rate, truncation_std = _aggregate(
+        checkpoint_metrics["truncation"][checkpoint]
+    )
+    illegal_actions, illegal_actions_std = _aggregate(
+        checkpoint_metrics["illegal_actions"][checkpoint]
+    )
+    draw_rate, _ = _aggregate(checkpoint_metrics["draw"][checkpoint])
+    loss_rate, _ = _aggregate(checkpoint_metrics["loss"][checkpoint])
+    return {
+        "phase": "control",
+        "algorithm": algorithm,
+        "checkpoint": checkpoint,
+        "state": "",
+        "value": "",
+        "visits": "",
+        "mean_return": mean_return,
+        "return_std": return_std,
+        "success_rate": success_rate,
+        "success_rate_std": success_rate_std,
+        "mean_episode_length": mean_length,
+        "episode_length_std": length_std,
+        "truncation_rate": truncation_rate,
+        "truncation_rate_std": truncation_std,
+        "illegal_actions": illegal_actions,
+        "illegal_actions_std": illegal_actions_std,
+        "draw_rate": draw_rate,
+        "loss_rate": loss_rate,
+        "evaluation_episodes": evaluation_episodes * completed_seeds,
+    }
+
+
 def run_control(
     environment: str,
     number_of_states: int,
@@ -306,13 +344,16 @@ def run_control(
     seeds: int,
     recordings_directory: Path,
     recording_checkpoints: tuple[int, ...],
+    metrics_path: Path,
+    initial_rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    rows = []
+    rows = initial_rows.copy()
     classes = (
         ("first_visit", FirstVisitMonteCarloControl),
         ("every_visit", EveryVisitMonteCarloControl),
     )
     for name, control_class in classes:
+        algorithm_rows: dict[int, dict[str, object]] = {}
         checkpoint_metrics: dict[str, dict[int, list[float]]] = {
             metric: {checkpoint: [] for checkpoint in EVALUATION_CHECKPOINTS}
             for metric in (
@@ -326,6 +367,7 @@ def run_control(
             )
         }
         for seed in range(seeds):
+            print(f"Control: {name}, seed {seed + 1}/{seeds}", flush=True)
             env = gym.make(environment)
             agent = control_class(
                 number_of_states,
@@ -335,10 +377,10 @@ def run_control(
             )
             completed_episodes = 0
             for checkpoint in EVALUATION_CHECKPOINTS:
-                target = (
-                    0
-                    if checkpoint == 0
-                    else max(1, round(training_episodes * checkpoint / 100))
+                target = checkpoint_episode_target(training_episodes, checkpoint)
+                print(
+                    f"  checkpoint {checkpoint}% ({target} training episodes)",
+                    flush=True,
                 )
                 while completed_episodes < target:
                     trajectory = generate_episode(
@@ -402,6 +444,19 @@ def run_control(
                         checkpoint_metrics[metric][checkpoint].append(
                             float(np.mean(values))
                         )
+                algorithm_rows[checkpoint] = _control_metric_row(
+                    name,
+                    checkpoint,
+                    checkpoint_metrics,
+                    evaluation_episodes,
+                    seed + 1,
+                )
+                completed_rows = rows + [
+                    algorithm_rows[item]
+                    for item in EVALUATION_CHECKPOINTS
+                    if item in algorithm_rows
+                ]
+                write_csv(metrics_path, tuple(rows[0]), completed_rows)
 
                 if renderable and seed == 0 and checkpoint in recording_checkpoints:
                     recording_seeds, frame_duration, terminal_duration = (
@@ -418,47 +473,8 @@ def run_control(
                         terminal_duration_ms=terminal_duration,
                     )
             env.close()
-        for checkpoint in EVALUATION_CHECKPOINTS:
-            mean_return, return_std = _aggregate(
-                checkpoint_metrics["return"][checkpoint]
-            )
-            success_rate, success_rate_std = _aggregate(
-                checkpoint_metrics["success"][checkpoint]
-            )
-            mean_length, length_std = _aggregate(
-                checkpoint_metrics["length"][checkpoint]
-            )
-            truncation_rate, truncation_std = _aggregate(
-                checkpoint_metrics["truncation"][checkpoint]
-            )
-            illegal_actions, illegal_actions_std = _aggregate(
-                checkpoint_metrics["illegal_actions"][checkpoint]
-            )
-            draw_rate, _ = _aggregate(checkpoint_metrics["draw"][checkpoint])
-            loss_rate, _ = _aggregate(checkpoint_metrics["loss"][checkpoint])
-            rows.append(
-                {
-                    "phase": "control",
-                    "algorithm": name,
-                    "checkpoint": checkpoint,
-                    "state": "",
-                    "value": "",
-                    "visits": "",
-                    "mean_return": mean_return,
-                    "return_std": return_std,
-                    "success_rate": success_rate,
-                    "success_rate_std": success_rate_std,
-                    "mean_episode_length": mean_length,
-                    "episode_length_std": length_std,
-                    "truncation_rate": truncation_rate,
-                    "truncation_rate_std": truncation_std,
-                    "illegal_actions": illegal_actions,
-                    "illegal_actions_std": illegal_actions_std,
-                    "draw_rate": draw_rate,
-                    "loss_rate": loss_rate,
-                    "evaluation_episodes": evaluation_episodes * seeds,
-                }
-            )
+        rows.extend(algorithm_rows[checkpoint] for checkpoint in EVALUATION_CHECKPOINTS)
+        write_csv(metrics_path, tuple(rows[0]), rows)
     return rows
 
 
@@ -686,13 +702,8 @@ def _control_table(
 
 
 def write_outputs(output: Path, rows: list[dict[str, object]], metadata: dict) -> None:
-    with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=rows[0])
-        writer.writeheader()
-        writer.writerows(rows)
-    (output / "metadata.json").write_text(
-        json.dumps(metadata, indent=2), encoding="utf-8"
-    )
+    write_csv(output / "metrics.csv", tuple(rows[0]), rows)
+    write_metadata(output / "metadata.json", metadata)
     environment = str(metadata["environment"])
     _write_figures(output, rows, int(metadata["seeds"]), environment)
     prediction_rows = [row for row in rows if row["phase"] == "prediction"]
@@ -816,38 +827,15 @@ def main() -> None:
     except (gym.error.Error, ValueError) as error:
         parser.error(str(error))
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    output = Path("runs/monte_carlo") / run_id
-    output.mkdir(parents=True, exist_ok=False)
+    output = create_run_directory("monte_carlo", args.environment)
     recordings_directory = output / "recordings"
     recordings_directory.mkdir()
-    rows = run_prediction(
-        args.environment,
-        number_of_states,
-        number_of_actions,
-        encoder,
-        prediction_episodes,
-        seed=0,
-    )
-    rows.extend(
-        run_control(
-            args.environment,
-            number_of_states,
-            number_of_actions,
-            encoder,
-            renderable,
-            training_episodes,
-            evaluation_episodes,
-            args.epsilon,
-            seeds,
-            recordings_directory,
-            (100,) if args.preset == "quick" else RECORDING_CHECKPOINTS,
-        )
-    )
+    metrics_path = output / "metrics.csv"
     recording_seeds, frame_duration, terminal_duration = recording_settings(
         args.environment
     )
     metadata = {
+        "status": "running",
         "environment": args.environment,
         "preset": args.preset,
         "prediction_episodes": prediction_episodes,
@@ -882,10 +870,38 @@ def main() -> None:
             else None
         ),
         "variability": "standard deviation across seed means",
-        "confidence_interval": "mean +/- 1.96 * standard_error",
+        "confidence_interval": "mean +/- 1.96 * standard error",
     }
+    write_metadata(output / "metadata.json", metadata)
+    print("Prediction: fixed policy", flush=True)
+    rows = run_prediction(
+        args.environment,
+        number_of_states,
+        number_of_actions,
+        encoder,
+        prediction_episodes,
+        seed=0,
+    )
+    write_csv(metrics_path, tuple(rows[0]), rows)
+    rows = run_control(
+        args.environment,
+        number_of_states,
+        number_of_actions,
+        encoder,
+        renderable,
+        training_episodes,
+        evaluation_episodes,
+        args.epsilon,
+        seeds,
+        recordings_directory,
+        (100,) if args.preset == "quick" else RECORDING_CHECKPOINTS,
+        metrics_path,
+        rows,
+    )
     write_outputs(output, rows, metadata)
-    print(output)
+    metadata["status"] = "complete"
+    write_metadata(output / "metadata.json", metadata)
+    print(f"Complete: {output}", flush=True)
 
 
 if __name__ == "__main__":

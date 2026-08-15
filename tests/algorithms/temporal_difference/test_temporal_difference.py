@@ -3,7 +3,7 @@ import pytest
 
 from rl_lib.algorithms.temporal_difference import (
     SARSA,
-    Q_learning,
+    QLearning,
     TDZeroPrediction,
 )
 
@@ -61,7 +61,7 @@ def test_sarsa_terminal_transition_does_not_require_a_next_action() -> None:
 
 
 def test_q_learning_uses_the_largest_next_action_value() -> None:
-    agent = Q_learning(
+    agent = QLearning(
         2,
         2,
         learning_rate=0.5,

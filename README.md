@@ -10,11 +10,11 @@ first principles and validates them with Gymnasium experiments.
 | Bandits | Epsilon-greedy and UCB; stationary and nonstationary |
 | Monte Carlo | First/every visit prediction and epsilon-greedy control |
 | Temporal difference | TD(0), SARSA, and Q-learning |
-| Function approximation | Semi-gradient SARSA and Q-learning |
+| Function approximation | Semi-gradient TD(0), SARSA, and Q-learning |
 | Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
 
-Bandits, Monte Carlo, and tabular temporal-difference methods are implemented
-currently. See
+Bandits, Monte Carlo, tabular temporal-difference, and function-approximation
+methods are implemented currently. See
 [`docs/roadmap.md`](docs/roadmap.md) for the planned order.
 
 ## Structure
@@ -33,20 +33,35 @@ python -m pip install -e ".[experiments,dev]"
 make check
 ```
 
+Make uses `python3` by default. To use a particular virtual environment without
+repeating its path, create an ignored `local.mk` containing:
+
+```make
+PYTHON := /path/to/virtualenv/bin/python
+```
+
 Run the implemented experiments with:
 
 ```bash
-make experiment MODULE=experiments.bandits.run
-make experiment MODULE=experiments.monte_carlo.run
-make experiment MODULE=experiments.monte_carlo.run ARGS="--environment Taxi-v4"
-make experiment MODULE=experiments.temporal_difference.run
-make experiment MODULE=experiments.temporal_difference.run ARGS="--environment FrozenLake-v1"
+make ba
+make mc
+make mc ARGS="--environment Taxi-v4"
+make td
+make td ARGS="--environment FrozenLake-v1"
+make fa ARGS="-p quick"
+make fa ARGS="-e MountainCar-v0 -p quick"
+make fa ARGS="-p tuning --lr 0.001 --eps 0.1"
 ```
+
+Run `make help` to see every experiment shortcut and accepted argument.
 
 Monte Carlo runs use environment-specific `standard` budgets. Add
 `--preset quick` for a short compatibility run; explicit episode counts still
 override the selected preset.
 
-Each run writes raw metrics and metadata, an automatically generated visual
-`summary.html`, and selected evaluation recordings under `runs/`. Standard runs
-record 25%, 50%, 75%, and 100%; quick runs record only 100%.
+Each run writes unsmoothed measurements to `metrics.csv`, complete configuration
+to `metadata.json`, an automatically generated `summary.html`, and selected
+evaluation recordings. Gymnasium outputs live under
+`runs/<family>/<environment>/<timestamp>/`; the multi-condition bandit runner
+uses `runs/bandits/<timestamp>/`. Standard runs record behavior at 25%, 50%,
+75%, and 100%; quick runs record only 100%.

@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments.bandits.environments import GaussianBandit
+from experiments.common import create_run_directory, write_csv, write_metadata
 from experiments.summary import SummaryMedia, SummaryTable, write_summary
 from rl_lib.algorithms.bandits import EpsilonGreedyBandits, UCBGreedyBandits
 
@@ -76,6 +74,10 @@ def run_experiment(runs: int, steps: int, seed: int) -> list[BanditResult]:
             ("ucb", (1.0, 2.0)),
         ):
             for parameter in parameters:
+                print(
+                    f"Condition: {environment}, {algorithm}, {parameter:g}",
+                    flush=True,
+                )
                 results.append(
                     run_condition(
                         environment,
@@ -210,14 +212,10 @@ def write_outputs(
     seed: int,
     smoothing_window: int,
 ) -> None:
-    output.mkdir(parents=True, exist_ok=False)
     figures = output / "figures"
     figures.mkdir()
     rows = _metric_rows(results)
-    with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=rows[0])
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv(output / "metrics.csv", tuple(rows[0]), rows)
     metadata = {
         "environment": "GaussianBandit",
         "runs": runs,
@@ -232,9 +230,7 @@ def write_outputs(
         "late_window_steps": min(100, steps),
         "smoothing_window": smoothing_window,
     }
-    (output / "metadata.json").write_text(
-        json.dumps(metadata, indent=2), encoding="utf-8"
-    )
+    write_metadata(output / "metadata.json", metadata)
     figure_path = figures / "learning_curves.png"
     _write_figure(figure_path, results, smoothing_window)
     write_summary(
@@ -278,8 +274,7 @@ def main() -> None:
     if args.runs < 1 or args.steps < 1 or args.smoothing_window < 1:
         parser.error("runs, steps, and smoothing window must be positive")
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    output = Path("runs/bandits") / run_id
+    output = create_run_directory("bandits")
     results = run_experiment(args.runs, args.steps, args.seed)
     write_outputs(
         output,
@@ -289,7 +284,7 @@ def main() -> None:
         seed=args.seed,
         smoothing_window=min(args.smoothing_window, args.steps),
     )
-    print(output)
+    print(f"Complete: {output}", flush=True)
 
 
 if __name__ == "__main__":

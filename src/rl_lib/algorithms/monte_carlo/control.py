@@ -7,6 +7,8 @@ from rl_lib.policies.tabular import TabularPolicy, epsilon_soft_probabilities
 
 
 class FirstVisitMonteCarloControl:
+    """First-visit Monte Carlo control with an epsilon-soft policy."""
+
     def __init__(
         self,
         number_of_states: int,
@@ -49,8 +51,9 @@ class FirstVisitMonteCarloControl:
         return self.policy.select_action(state)
 
     def update(self, episode: Episode) -> None:
-        """----- Monte Carlo policy evaluation -----"""
+        """Update action values and improve the policy from one episode."""
 
+        # Monte Carlo policy evaluation
         rewards = [step.reward for step in episode.steps]
         episode_returns = discounted_returns(rewards, self.discount)
         first_visited_pairs = set()
@@ -73,8 +76,7 @@ class FirstVisitMonteCarloControl:
                     episode_return - self.Q[state, action]
                 ) / self.visit_counts[state, action]
 
-        """----- Monte Carlo policy improvement -----"""
-
+        # Monte Carlo policy improvement
         for state in first_visited_states:
             probabilities = epsilon_soft_probabilities(
                 self.Q[state],
@@ -88,6 +90,8 @@ class FirstVisitMonteCarloControl:
 
 
 class EveryVisitMonteCarloControl:
+    """Every-visit Monte Carlo control with an epsilon-soft policy."""
+
     def __init__(
         self,
         number_of_states: int,
@@ -130,8 +134,9 @@ class EveryVisitMonteCarloControl:
         return self.policy.select_action(state)
 
     def update(self, episode: Episode) -> None:
-        """----- Monte Carlo policy evaluation -----"""
+        """Update action values and improve the policy from one episode."""
 
+        # Monte Carlo policy evaluation
         rewards = [step.reward for step in episode.steps]
         episode_returns = discounted_returns(rewards, self.discount)
         visited_states = set()
@@ -150,8 +155,7 @@ class EveryVisitMonteCarloControl:
                 episode_return - self.Q[state, action]
             ) / self.visit_counts[state, action]
 
-        """----- Monte Carlo policy improvement -----"""
-
+        # Monte Carlo policy improvement
         for state in visited_states:
             probabilities = epsilon_soft_probabilities(
                 self.Q[state],
