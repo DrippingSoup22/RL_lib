@@ -8,7 +8,7 @@ ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup test coverage lint format format-check check experiment ba mc td fa
+.PHONY: help setup test coverage lint format format-check check experiment ba mc td fa pg
 
 help: ## Show the available commands.
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -22,6 +22,7 @@ help: ## Show the available commands.
 	@echo '      --preset {quick,standard} --prediction-episodes N'
 	@echo '      --training-episodes N --evaluation-episodes N --seeds N'
 	@echo '      --learning-rate FLOAT --discount FLOAT --epsilon FLOAT'
+	@echo '      --rollout/--n-steps N'
 	@echo '      --map-size N --safe-probability FLOAT --non-slippery'
 	@echo '      --max-episode-steps N'
 	@echo '  fa  -e/--env/--environment {Acrobot-v1,MountainCar-v0}'
@@ -31,7 +32,20 @@ help: ## Show the available commands.
 	@echo '      -n/--seeds N --lr/--learning-rate FLOAT --lr-min FLOAT'
 	@echo '      --val/--validation-episodes N'
 	@echo '      --gamma/--discount FLOAT --eps/--epsilon FLOAT'
+	@echo '      --rollout/--n-steps N'
 	@echo '      --sarsa-eps-final/--sarsa-final-epsilon FLOAT'
+	@echo '      --hidden/--hidden-sizes N [N ...]'
+	@echo '      -r/--record/--recordings {none,final,checkpoints}'
+	@echo '      --diag/--diagnostics'
+	@echo '  pg  -e/--env/--environment {CartPole-v1,Acrobot-v1}'
+	@echo '      -p/--preset {quick,tuning,standard}'
+	@echo '      --algorithm/--algorithms {reinforce,reinforce_with_baseline,a2c} [...]'
+	@echo '      --train/--training-episodes N --eval/--evaluation-episodes N'
+	@echo '      -n/--seeds N --lr/--actor-lr FLOAT --lr-min FLOAT'
+	@echo '      --critic-lr FLOAT --critic-lr-min FLOAT --wd/--weight-decay FLOAT'
+	@echo '      -o/--opt/--optimizer {sgd,adam,adamw} --gamma/--discount FLOAT'
+	@echo '      --warmup/--warmup-episodes N --warmup-start FLOAT'
+	@echo '      --rollout/--a2c-rollout-steps N --entropy FLOAT'
 	@echo '      --hidden/--hidden-sizes N [N ...]'
 	@echo '      -r/--record/--recordings {none,final,checkpoints}'
 	@echo '      --diag/--diagnostics'
@@ -71,3 +85,6 @@ td: ## Run the temporal-difference experiment with optional ARGS="...".
 
 fa: ## Run the function-approximation experiment with optional ARGS="...".
 	$(PYTHON) -m experiments.function_approximation.run $(ARGS)
+
+pg: ## Run the policy-gradient experiment with optional ARGS="...".
+	$(PYTHON) -m experiments.policy_gradient.run $(ARGS)

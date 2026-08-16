@@ -1,26 +1,29 @@
 """Episode data structures for episodic reinforcement-learning algorithms."""
 
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+StateT = TypeVar("StateT")
+
 
 @dataclass(frozen=True)
-class EpisodeStep:
+class EpisodeStep(Generic[StateT]):
     """One state, action, and resulting reward from an episode."""
 
-    state: int
+    state: StateT
     action: int
     reward: float
 
 
 @dataclass(frozen=True)
-class Episode:
+class Episode(Generic[StateT]):
     """A completed sequence of interactions and its stopping condition."""
 
-    steps: tuple[EpisodeStep, ...]
-    final_state: int
+    steps: tuple[EpisodeStep[StateT], ...]
+    final_state: StateT
     terminated: bool
     truncated: bool
 

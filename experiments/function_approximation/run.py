@@ -20,6 +20,7 @@ from experiments.common import (
     annotated_frame,
     checkpoint_episode_target,
     create_run_directory,
+    recording_title,
     write_csv,
     write_metadata,
 )
@@ -32,6 +33,7 @@ from rl_lib.algorithms.function_approximation import (
     SemiGradientQLearning,
     SemiGradientSARSA,
 )
+from rl_lib.data import EpisodeStep
 from rl_lib.models import ActionValueNetwork
 
 ENVIRONMENTS = ("Acrobot-v1", "MountainCar-v0")
@@ -212,10 +214,12 @@ def train_episode(
     agent: Agent,
     *,
     seed: int,
+    rollout_steps: int,
     collect_diagnostics: bool = False,
 ) -> EpisodeResult:
     observation, _ = env.reset(seed=seed)
     action = agent.select_action(observation)
+    rollout: list[EpisodeStep[np.ndarray]] = []
     episode_return = 0.0
     episode_length = 0
     tracker = (
@@ -231,40 +235,48 @@ def train_episode(
             model_action_values(agent, observation) if tracker is not None else None
         )
         next_observation, reward, terminated, truncated, _ = env.step(current_action)
+        rollout.append(
+            EpisodeStep(
+                np.asarray(observation, dtype=np.float32).copy(),
+                current_action,
+                float(reward),
+            )
+        )
         episode_return += float(reward)
         episode_length += 1
 
+        should_update = len(rollout) == rollout_steps or terminated or truncated
+        td_errors: tuple[float, ...] = ()
         if isinstance(agent, SemiGradientSARSA):
             if terminated:
                 next_action = None
             else:
                 next_action = agent.select_action(next_observation)
-
-            td_error = agent.update(
-                observation,
-                current_action,
-                float(reward),
+            if should_update:
+                td_errors = agent.update(
+                    tuple(rollout),
+                    next_observation,
+                    next_action,
+                    terminated=terminated,
+                )
+        elif should_update:
+            td_errors = agent.update(
+                tuple(rollout),
                 next_observation,
-                next_action,
-                terminated,
-            )
-        else:
-            td_error = agent.update(
-                observation,
-                current_action,
-                float(reward),
-                next_observation,
-                terminated,
+                terminated=terminated,
             )
 
         if tracker is not None:
             assert pre_update_action_values is not None
-            tracker.record_step(
+            tracker.record_transition(
                 reward=float(reward),
                 action=current_action,
-                td_error=td_error,
                 action_values=pre_update_action_values,
             )
+            tracker.record_td_errors(td_errors)
+
+        if should_update:
+            rollout.clear()
 
         if terminated or truncated:
             break
@@ -519,19 +531,23 @@ def run_control(
     sarsa_final_epsilon: float,
     optimizer_name: str,
     hidden_sizes: tuple[int, ...],
+    rollout_steps: int,
     recordings_directory: Path,
     metrics_path: Path,
     diagnostics_path: Path | None,
     validation_episodes: int,
     recording_checkpoints: tuple[int, ...],
     frame_stride: int,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, int]]:
     rows: list[dict[str, object]] = []
     diagnostic_rows: list[dict[str, object]] = []
     if diagnostics_path is not None:
         write_csv(diagnostics_path, DIAGNOSTIC_FIELDS, diagnostic_rows)
+    selected_recording_seeds: dict[str, int] = {}
 
     for algorithm in ALGORITHMS:
+        recording_states: dict[int, dict[int, ModelState]] = {}
+        recording_agent: Agent | None = None
         for seed in range(seeds):
             print(f"{algorithm}: seed {seed + 1}/{seeds}", flush=True)
             training_env = make_environment(environment)
@@ -583,6 +599,7 @@ def run_control(
                         training_env,
                         agent,
                         seed=seed * training_episodes + completed_episodes,
+                        rollout_steps=rollout_steps,
                         collect_diagnostics=diagnostics_path is not None,
                     )
                     scheduler.step()
@@ -677,20 +694,53 @@ def run_control(
                     )
                 write_csv(metrics_path, CSV_FIELDS, rows)
 
-                if seed == 0 and checkpoint in recording_checkpoints:
-                    record_evaluation(
-                        recordings_directory
-                        / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
-                        environment,
-                        agent,
-                        seed=2_000_000 + checkpoint,
-                        frame_stride=frame_stride,
+                if checkpoint in recording_checkpoints:
+                    recording_states.setdefault(seed, {})[checkpoint] = (
+                        copy_model_state(agent.model)
                     )
                 if checkpoint < 100:
                     agent.model.load_state_dict(current_model_state)
             training_env.close()
             evaluation_env.close()
-    return rows
+            recording_agent = agent
+
+        final_seed_scores = {}
+        for seed in range(seeds):
+            selected = [
+                row
+                for row in rows
+                if row["algorithm"] == algorithm
+                and int(row["seed"]) == seed
+                and int(row["checkpoint"]) == 100
+                and row["evaluation_kind"] == "held_out"
+            ]
+            final_seed_scores[seed] = (
+                float(np.mean([float(row["episode_return"]) for row in selected])),
+                float(np.mean([float(row["success"]) for row in selected])),
+                float(np.mean([float(row["progress"]) for row in selected])),
+            )
+        selected_seed = max(final_seed_scores, key=final_seed_scores.__getitem__)
+        selected_recording_seeds[algorithm] = selected_seed
+        if recording_checkpoints:
+            assert recording_agent is not None
+            print(
+                f"{algorithm}: recordings use best final seed {selected_seed}",
+                flush=True,
+            )
+            for checkpoint in recording_checkpoints:
+                recording_agent.model.load_state_dict(
+                    recording_states[selected_seed][checkpoint]
+                )
+                record_evaluation(
+                    recordings_directory
+                    / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
+                    environment,
+                    recording_agent,
+                    seed=2_000_000 + checkpoint,
+                    frame_stride=frame_stride,
+                )
+                print(f"  recorded checkpoint {checkpoint}%", flush=True)
+    return rows, selected_recording_seeds
 
 
 def aggregate_rows(
@@ -819,9 +869,39 @@ def write_outputs(
         )
         for row in aggregate
     )
+    final_seed_rows = []
+    for algorithm in ALGORITHMS:
+        for seed in sorted({int(row["seed"]) for row in rows}):
+            selected = [
+                row
+                for row in rows
+                if row["algorithm"] == algorithm
+                and int(row["seed"]) == seed
+                and int(row["checkpoint"]) == 100
+                and row["evaluation_kind"] == "held_out"
+            ]
+            if selected:
+                mean_return = np.mean(
+                    [float(row["episode_return"]) for row in selected]
+                )
+                mean_success = np.mean([float(row["success"]) for row in selected])
+                mean_progress = np.mean([float(row["progress"]) for row in selected])
+                mean_length = np.mean(
+                    [float(row["episode_length"]) for row in selected]
+                )
+                final_seed_rows.append(
+                    (
+                        algorithm,
+                        seed,
+                        f"{mean_return:.3f}",
+                        f"{mean_success:.3f}",
+                        f"{mean_progress:.3f}",
+                        f"{mean_length:.2f}",
+                    )
+                )
     recordings = tuple(
         SummaryMedia(
-            path.stem.replace("_checkpoint_", " - ").replace("_", " ") + "%",
+            recording_title(path, metadata["recording_seed_by_algorithm"]),
             path.relative_to(output),
         )
         for path in sorted(
@@ -854,6 +934,7 @@ def write_outputs(
                 f"{metadata['minimum_learning_rate']}"
             ),
             "Discount": metadata["discount"],
+            "Rollout length": metadata["rollout_steps"],
             "SARSA epsilon": (
                 str(metadata["initial_epsilon"])
                 if metadata["sarsa_epsilon_schedule"] == "constant"
@@ -864,6 +945,7 @@ def write_outputs(
             ),
             "Q-learning epsilon": f"{metadata['initial_epsilon']} (constant)",
             "Observations": "statically rescaled to [-1, 1]",
+            "Recorded seed by algorithm": metadata["recording_seed_by_algorithm"],
         },
         tables=(
             SummaryTable(
@@ -878,6 +960,18 @@ def write_outputs(
                     "Truncation rate",
                 ),
                 table_rows,
+            ),
+            SummaryTable(
+                "Final held-out evaluation by seed",
+                (
+                    "Algorithm",
+                    "Seed",
+                    "Mean return",
+                    "Success rate",
+                    progress_label,
+                    "Episode length",
+                ),
+                tuple(final_seed_rows),
             ),
         ),
         figures=(
@@ -942,6 +1036,16 @@ def main() -> None:
         help="fixed-seed episodes for best-checkpoint selection (default: up to 5)",
     )
     parser.add_argument("--discount", "--gamma", type=float, default=0.99)
+    parser.add_argument(
+        "--rollout-steps",
+        "--rollout",
+        "--n-steps",
+        "--n-step",
+        dest="rollout_steps",
+        type=int,
+        default=1,
+        help="maximum transitions per semi-gradient TD rollout (default: 1)",
+    )
     parser.add_argument("--epsilon", "--eps", type=float, default=0.1)
     parser.add_argument(
         "--sarsa-final-epsilon",
@@ -1016,6 +1120,8 @@ def main() -> None:
         parser.error("minimum learning rate must be finite and between 0 and --lr")
     if not np.isfinite(args.discount) or not 0 <= args.discount <= 1:
         parser.error("discount must be finite and in [0, 1]")
+    if args.rollout_steps < 1:
+        parser.error("rollout steps must be positive")
     if not np.isfinite(args.epsilon) or not 0 <= args.epsilon <= 1:
         parser.error("epsilon must be finite and in [0, 1]")
     sarsa_final_epsilon = (
@@ -1086,6 +1192,7 @@ def main() -> None:
         "minimum_learning_rate": minimum_learning_rate,
         "learning_rate_schedule": "cosine annealing once per training episode",
         "discount": args.discount,
+        "rollout_steps": args.rollout_steps,
         "initial_epsilon": args.epsilon,
         "sarsa_final_epsilon": sarsa_final_epsilon,
         "sarsa_epsilon_schedule": (
@@ -1141,7 +1248,7 @@ def main() -> None:
         "torch_interop_threads": torch.get_num_interop_threads(),
     }
     write_metadata(output / "metadata.json", metadata)
-    rows = run_control(
+    rows, selected_recording_seeds = run_control(
         args.environment,
         training_episodes=training_episodes,
         evaluation_episodes=evaluation_episodes,
@@ -1153,6 +1260,7 @@ def main() -> None:
         sarsa_final_epsilon=sarsa_final_epsilon,
         optimizer_name=args.optimizer,
         hidden_sizes=hidden_sizes,
+        rollout_steps=args.rollout_steps,
         recordings_directory=recordings_directory,
         metrics_path=output / "metrics.csv",
         diagnostics_path=(
@@ -1162,6 +1270,10 @@ def main() -> None:
         recording_checkpoints=recording_checkpoints,
         frame_stride=frame_stride,
     )
+    metadata["recording_seed_selection"] = (
+        "highest final mean held-out return; success and progress break ties"
+    )
+    metadata["recording_seed_by_algorithm"] = selected_recording_seeds
     write_outputs(output, args.environment, rows, metadata)
     metadata["status"] = "complete"
     write_metadata(output / "metadata.json", metadata)

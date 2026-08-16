@@ -11,18 +11,25 @@ make mc ARGS="--environment Taxi-v4 --preset quick"
 make td
 make td ARGS="--environment FrozenLake-v1"
 make td ARGS="--preset quick"
+make td ARGS="--preset quick --rollout 5"
 make fa
 make fa ARGS="-e MountainCar-v0"
 make fa ARGS="-p quick"
 make fa ARGS="-p tuning --lr 0.001 --eps 0.1"
+make fa ARGS="-p quick --rollout 5"
+make pg ARGS="-p quick"
+make pg ARGS="-e Acrobot-v1 -p tuning"
 ```
 
 `make help` lists every shortcut and all accepted runner arguments. The generic
 `make experiment MODULE=experiments.<family>.run` form remains available.
 
-The temporal-difference runner evaluates TD(0) prediction, SARSA, and Q-learning.
-It uses `CliffWalking-v1` as the primary environment and configurable generated
-`FrozenLake-v1` maps as the challenge. Compared control algorithms share maps,
+The temporal-difference runner evaluates rollout TD prediction, SARSA, and
+Q-learning. `--rollout` selects the maximum rollout length and defaults to one,
+retaining the original one-step behavior. Like A2C, each update builds returns
+backward from one endpoint bootstrap and uses every transition in the bounded
+rollout. `CliffWalking-v1` is the primary environment and configurable generated
+`FrozenLake-v1` maps are the challenge. Compared control algorithms share maps,
 training seeds, and frozen greedy evaluation seeds.
 
 The Monte Carlo runner accepts Blackjack and zero-based Gymnasium environments
@@ -30,21 +37,50 @@ with discrete observation and action spaces. Blackjack keeps its small custom
 state encoder and value heatmaps; other environments use the generic tabular
 path and a uniform-random prediction policy.
 
-The function-approximation runner compares semi-gradient SARSA with Q-learning
-on continuous observations and discrete actions. Semi-gradient TD(0) prediction
-is covered by deterministic component tests rather than this control experiment.
+The function-approximation runner compares semi-gradient rollout SARSA with
+rollout Q-learning on continuous observations and discrete actions. It also
+accepts `--rollout` as the maximum rollout length, defaulting to the former
+one-step behavior. Semi-gradient rollout TD prediction is covered by
+deterministic component tests rather than this control experiment.
 The runner uses `Acrobot-v1` as the primary environment and `MountainCar-v0` as
 the challenge. Observations are statically rescaled to `[-1, 1]`; compared
 agents share environment seeds and initial network parameters. Summaries report
 frozen greedy success and an environment-specific progress measurement: maximum
 position for MountainCar and maximum tip height for Acrobot.
 
+The policy-gradient runner compares REINFORCE, REINFORCE with a learned
+state-value baseline, and A2C on `CartPole-v1`, with `Acrobot-v1` as the
+challenge. Observations are flattened to `float32` without rescaling.
+REINFORCE updates after each complete trajectory; A2C updates during an episode
+from bounded n-step rollouts, bootstrapping at ordinary rollout boundaries and
+after truncation but not true termination. `--rollout` controls the maximum
+rollout length and defaults to five transitions. `--entropy` controls A2C's
+optional entropy bonus and defaults to zero for the unregularized comparison.
+All three algorithms run by default; `--algorithm a2c` selects only A2C for
+focused tuning, while `--algorithms reinforce_with_baseline a2c` selects an
+ordered subset.
+Evaluation samples the frozen categorical policy: CartPole succeeds by reaching
+its time limit, while Acrobot succeeds by truly terminating at its goal.
+
+Policy-gradient actor and critic learning rates follow independent cosine
+schedules stepped once per training episode. By default, a linear warmup covers
+the first ten percent of training and starts at one tenth of each peak learning
+rate; `--warmup` sets its episode count or disables it with zero, while
+`--warmup-start` sets the initial factor. `--lr` and `--lr-min` configure the
+actor; `--critic-lr` and `--critic-lr-min` configure the baseline and A2C
+critics. Each minimum defaults to one percent of its peak. The refined defaults
+use actor and critic peaks of `0.003` and `0.01`. The runner supports SGD, Adam,
+and AdamW through `-o`; the default is AdamW with `--wd 0.0001` applied to both
+networks. Optional `--diag` training diagnostics write one compact row per
+completed training episode to `training_diagnostics.csv`, including learning
+rates, losses, policy entropy, and A2C's number of rollout updates.
+
 The `standard` preset is the multi-seed experiment and chooses budgets suited to
 each environment's episode length. It records all four evaluation checkpoints.
 The `quick` preset is only a short pipeline check and records the final policy.
 Function approximation also has a one-seed `tuning` preset with a moderate
-budget and no recordings. Explicit episode-count and seed options override any
-preset.
+budget and no recordings. Policy gradients use the same three preset names.
+Explicit episode-count and seed options override any preset.
 
 The function-approximation runner keeps its full option names but also provides
 short forms for repeated tuning work: `-e` for environment, `-p` for preset,
@@ -77,6 +113,12 @@ environments produce an embedded GIF or video per checkpoint; non-visual
 environments use a learning curve. Normal training is never rendered. Gymnasium outputs use
 `runs/<family>/<environment>/<timestamp>/`. The bandit runner covers both of its
 synthetic conditions in one `runs/bandits/<timestamp>/` directory.
+
+For every non-bandit algorithm, recordings show one coherent run: the seed with
+the highest final mean frozen-evaluation return, with success rate as the main
+tiebreaker. All requested checkpoints come from that seed. Summaries still show
+the across-seed aggregate and a separate final row for every seed, and metadata
+records the selected visual seed.
 
 Learning curves also include a frozen 0% baseline when their metric is defined
 before training. The 0% baseline is measured but not recorded as a GIF.

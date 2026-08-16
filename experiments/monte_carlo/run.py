@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -18,6 +19,7 @@ from experiments.common import (
     annotated_frame,
     checkpoint_episode_target,
     create_run_directory,
+    recording_title,
     write_csv,
     write_metadata,
 )
@@ -138,10 +140,10 @@ def generate_episode(
     *,
     seed: int,
     encode_observation: Callable[[Any], int] = encode_discrete_state,
-) -> Episode:
+) -> Episode[int]:
     observation, _ = env.reset(seed=seed)
     state = encode_observation(observation)
-    steps: list[EpisodeStep] = []
+    steps: list[EpisodeStep[int]] = []
     terminated = truncated = False
     while not (terminated or truncated):
         action = select_action(state)
@@ -214,6 +216,7 @@ def run_prediction(
                 {
                     "phase": "prediction",
                     "algorithm": name,
+                    "seed": 0,
                     "checkpoint": 100,
                     "state": state,
                     "value": float(estimator.V[state]),
@@ -246,6 +249,7 @@ def record_evaluation(
     frame_duration_ms: int,
     terminal_duration_ms: int,
 ) -> None:
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     env = gym.make(environment, render_mode="rgb_array")
     policy = partial(greedy_action, action_values, np.random.default_rng(0))
     frames = []
@@ -312,6 +316,7 @@ def _control_metric_row(
     return {
         "phase": "control",
         "algorithm": algorithm,
+        "seed": "",
         "checkpoint": checkpoint,
         "state": "",
         "value": "",
@@ -332,6 +337,44 @@ def _control_metric_row(
     }
 
 
+def _control_seed_row(
+    algorithm: str,
+    seed: int,
+    checkpoint: int,
+    samples: dict[str, list[float]],
+    evaluation_episodes: int,
+) -> dict[str, object]:
+    """Keep one evaluated mean per seed instead of discarding it after aggregation."""
+    return {
+        "phase": "control_seed",
+        "algorithm": algorithm,
+        "seed": seed,
+        "checkpoint": checkpoint,
+        "state": "",
+        "value": "",
+        "visits": "",
+        "mean_return": float(np.mean(samples["return"])),
+        "return_std": "",
+        "success_rate": (
+            float(np.mean(samples["success"])) if samples["success"] else ""
+        ),
+        "success_rate_std": "",
+        "mean_episode_length": float(np.mean(samples["length"])),
+        "episode_length_std": "",
+        "truncation_rate": float(np.mean(samples["truncation"])),
+        "truncation_rate_std": "",
+        "illegal_actions": (
+            float(np.mean(samples["illegal_actions"]))
+            if samples["illegal_actions"]
+            else ""
+        ),
+        "illegal_actions_std": "",
+        "draw_rate": float(np.mean(samples["draw"])) if samples["draw"] else "",
+        "loss_rate": float(np.mean(samples["loss"])) if samples["loss"] else "",
+        "evaluation_episodes": evaluation_episodes,
+    }
+
+
 def run_control(
     environment: str,
     number_of_states: int,
@@ -346,13 +389,15 @@ def run_control(
     recording_checkpoints: tuple[int, ...],
     metrics_path: Path,
     initial_rows: list[dict[str, object]],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, int]]:
     rows = initial_rows.copy()
+    selected_recording_seeds: dict[str, int] = {}
     classes = (
         ("first_visit", FirstVisitMonteCarloControl),
         ("every_visit", EveryVisitMonteCarloControl),
     )
     for name, control_class in classes:
+        recording_values: dict[int, dict[int, np.ndarray]] = {}
         algorithm_rows: dict[int, dict[str, object]] = {}
         checkpoint_metrics: dict[str, dict[int, list[float]]] = {
             metric: {checkpoint: [] for checkpoint in EVALUATION_CHECKPOINTS}
@@ -444,6 +489,15 @@ def run_control(
                         checkpoint_metrics[metric][checkpoint].append(
                             float(np.mean(values))
                         )
+                rows.append(
+                    _control_seed_row(
+                        name,
+                        seed,
+                        checkpoint,
+                        samples,
+                        evaluation_episodes,
+                    )
+                )
                 algorithm_rows[checkpoint] = _control_metric_row(
                     name,
                     checkpoint,
@@ -458,24 +512,48 @@ def run_control(
                 ]
                 write_csv(metrics_path, tuple(rows[0]), completed_rows)
 
-                if renderable and seed == 0 and checkpoint in recording_checkpoints:
-                    recording_seeds, frame_duration, terminal_duration = (
-                        recording_settings(environment)
-                    )
-                    record_evaluation(
-                        recordings_directory
-                        / f"{name}_checkpoint_{checkpoint:03d}.gif",
-                        environment=environment,
-                        encode_observation=encode_observation,
-                        action_values=agent.Q,
-                        seeds=recording_seeds,
-                        frame_duration_ms=frame_duration,
-                        terminal_duration_ms=terminal_duration,
-                    )
+                if renderable and checkpoint in recording_checkpoints:
+                    recording_values.setdefault(seed, {})[checkpoint] = agent.Q.copy()
             env.close()
         rows.extend(algorithm_rows[checkpoint] for checkpoint in EVALUATION_CHECKPOINTS)
         write_csv(metrics_path, tuple(rows[0]), rows)
-    return rows
+
+        final_seed_rows = [
+            row
+            for row in rows
+            if row["phase"] == "control_seed"
+            and row["algorithm"] == name
+            and row["checkpoint"] == 100
+        ]
+        selected_row = max(
+            final_seed_rows,
+            key=lambda row: (
+                float(row["mean_return"]),
+                float(row["success_rate"]) if row["success_rate"] != "" else 0.0,
+            ),
+        )
+        selected_seed = int(selected_row["seed"])
+        selected_recording_seeds[name] = selected_seed
+        if renderable and recording_checkpoints:
+            print(
+                f"Control: {name}, recordings use best final seed {selected_seed}",
+                flush=True,
+            )
+            recording_seeds, frame_duration, terminal_duration = recording_settings(
+                environment
+            )
+            for checkpoint in recording_checkpoints:
+                record_evaluation(
+                    recordings_directory / f"{name}_checkpoint_{checkpoint:03d}.gif",
+                    environment=environment,
+                    encode_observation=encode_observation,
+                    action_values=recording_values[selected_seed][checkpoint],
+                    seeds=recording_seeds,
+                    frame_duration_ms=frame_duration,
+                    terminal_duration_ms=terminal_duration,
+                )
+                print(f"  recorded checkpoint {checkpoint}%", flush=True)
+    return rows, selected_recording_seeds
 
 
 def _write_prediction_figure(
@@ -708,6 +786,7 @@ def write_outputs(output: Path, rows: list[dict[str, object]], metadata: dict) -
     _write_figures(output, rows, int(metadata["seeds"]), environment)
     prediction_rows = [row for row in rows if row["phase"] == "prediction"]
     control_rows = [row for row in rows if row["phase"] == "control"]
+    seed_rows = [row for row in rows if row["phase"] == "control_seed"]
     prediction_summary = []
     for algorithm in ("first_visit", "every_visit"):
         selected = [row for row in prediction_rows if row["algorithm"] == algorithm]
@@ -730,7 +809,7 @@ def write_outputs(output: Path, rows: list[dict[str, object]], metadata: dict) -
         )
     recordings = tuple(
         SummaryMedia(
-            path.stem.replace("_checkpoint_", " - ").replace("_", " ") + "%",
+            recording_title(path, metadata["recording_seed_by_algorithm"]),
             path.relative_to(output),
         )
         for path in sorted(
@@ -755,6 +834,7 @@ def write_outputs(output: Path, rows: list[dict[str, object]], metadata: dict) -
             ),
             "Seeds": metadata["seeds"],
             "Training epsilon": metadata["epsilon"],
+            "Recorded seed by algorithm": metadata["recording_seed_by_algorithm"],
         },
         tables=(
             SummaryTable(
@@ -769,6 +849,33 @@ def write_outputs(output: Path, rows: list[dict[str, object]], metadata: dict) -
                 prediction_summary,
             ),
             _control_table(environment, control_rows),
+            SummaryTable(
+                "Final control evaluation by seed",
+                (
+                    "Algorithm",
+                    "Seed",
+                    "Mean return",
+                    "Success rate",
+                    "Episode length",
+                    "Truncation rate",
+                ),
+                tuple(
+                    (
+                        row["algorithm"],
+                        row["seed"],
+                        f"{float(row['mean_return']):.3f}",
+                        (
+                            f"{float(row['success_rate']):.3f}"
+                            if row["success_rate"] != ""
+                            else "not defined"
+                        ),
+                        f"{float(row['mean_episode_length']):.2f}",
+                        f"{float(row['truncation_rate']):.3f}",
+                    )
+                    for row in seed_rows
+                    if row["checkpoint"] == 100
+                ),
+            ),
         ),
         figures=(
             SummaryMedia(
@@ -860,7 +967,7 @@ def main() -> None:
         ),
         "recording_environment_seeds": list(recording_seeds) if renderable else [],
         "recording_episodes": len(recording_seeds) if renderable else 0,
-        "recording_policy_seed": 0,
+        "recording_greedy_tie_break_seed": 0,
         "recording_frame_duration_ms": frame_duration,
         "terminal_frame_duration_ms": terminal_duration,
         "evaluation_policy": "frozen greedy",
@@ -883,7 +990,7 @@ def main() -> None:
         seed=0,
     )
     write_csv(metrics_path, tuple(rows[0]), rows)
-    rows = run_control(
+    rows, selected_recording_seeds = run_control(
         args.environment,
         number_of_states,
         number_of_actions,
@@ -898,6 +1005,10 @@ def main() -> None:
         metrics_path,
         rows,
     )
+    metadata["recording_seed_selection"] = (
+        "highest final mean evaluation return; success rate breaks ties"
+    )
+    metadata["recording_seed_by_algorithm"] = selected_recording_seeds
     write_outputs(output, rows, metadata)
     metadata["status"] = "complete"
     write_metadata(output / "metadata.json", metadata)

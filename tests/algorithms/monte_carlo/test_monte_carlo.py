@@ -11,7 +11,7 @@ from rl_lib.data.episode import Episode, EpisodeStep, discounted_returns
 from rl_lib.policies import epsilon_soft_probabilities, policy_from_action_values
 
 
-def repeated_state_episode() -> Episode:
+def repeated_state_episode() -> Episode[int]:
     return Episode(
         steps=(
             EpisodeStep(0, 0, 1.0),

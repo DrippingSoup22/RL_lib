@@ -34,6 +34,13 @@ def checkpoint_episode_target(total_episodes: int, checkpoint: int) -> int:
     return max(1, round(total_episodes * checkpoint / 100))
 
 
+def recording_title(path: Path, seed_by_algorithm: Mapping[str, int]) -> str:
+    """Build a readable recording caption including its selected training seed."""
+    algorithm, checkpoint = path.stem.split("_checkpoint_", maxsplit=1)
+    label = algorithm.replace("_", " ")
+    return f"{label} - {int(checkpoint)}%, seed {seed_by_algorithm[algorithm]}"
+
+
 def write_csv(
     path: Path,
     fieldnames: Sequence[str],

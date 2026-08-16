@@ -1,10 +1,14 @@
-"""One-step tabular temporal-difference prediction."""
+"""Tabular temporal-difference prediction with rollout returns."""
+
+from collections.abc import Sequence
 
 import numpy as np
 
+from rl_lib.data import EpisodeStep
 
-class TDZeroPrediction:
-    """Estimate a fixed policy's state values with tabular TD(0)."""
+
+class TDPrediction:
+    """Estimate a fixed policy's state values from bootstrapped rollouts."""
 
     def __init__(
         self,
@@ -13,7 +17,6 @@ class TDZeroPrediction:
         discount: float = 1.0,
         initial_value: float = 0.0,
     ) -> None:
-
         if number_of_states < 1:
             raise ValueError("Number of states must be at least 1")
         if not 0 < learning_rate <= 1:
@@ -26,29 +29,35 @@ class TDZeroPrediction:
         self.number_of_states = number_of_states
         self.learning_rate = learning_rate
         self.discount = discount
-        self.initial_value = initial_value
-
-        self.V = np.full(number_of_states, self.initial_value, dtype=float)
+        self.V = np.full(number_of_states, initial_value, dtype=float)
 
     def update(
         self,
-        state: int,
-        reward: float,
-        next_state: int,
+        steps: Sequence[EpisodeStep[int]],
+        final_state: int,
+        *,
         terminated: bool,
-    ) -> None:
+    ) -> tuple[float, ...]:
+        """Update every state in a rollout and return its TD errors."""
+        if not steps:
+            raise ValueError("Steps must not be empty")
+        if not 0 <= final_state < self.number_of_states:
+            raise ValueError("Final state must stay inside the states table")
+        for step in steps:
+            if not 0 <= step.state < self.number_of_states:
+                raise ValueError("State must stay inside the states table")
+            if not np.isfinite(step.reward):
+                raise ValueError("Reward must be finite")
 
-        if not np.isfinite(reward):
-            raise ValueError("Reward must be finite!")
-        if not 0 <= state < self.number_of_states:
-            raise ValueError("State must stay inside the states table!")
-        if not 0 <= next_state < self.number_of_states:
-            raise ValueError("Next state must stay inside the states table!")
+        running_return = 0.0 if terminated else float(self.V[final_state])
+        returns = np.empty(len(steps), dtype=float)
+        for index in range(len(steps) - 1, -1, -1):
+            running_return = steps[index].reward + self.discount * running_return
+            returns[index] = running_return
 
-        if terminated:
-            target = reward
-        else:
-            target = reward + self.discount * self.V[next_state]
-
-        error = target - self.V[state]
-        self.V[state] += self.learning_rate * error
+        errors = []
+        for step, target in zip(steps, returns, strict=True):
+            error = target - self.V[step.state]
+            self.V[step.state] += self.learning_rate * error
+            errors.append(float(error))
+        return tuple(errors)

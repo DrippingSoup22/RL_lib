@@ -9,14 +9,25 @@ from experiments.monte_carlo.run import (
     BLACKJACK_ACTIONS,
     BLACKJACK_STATES,
     encode_blackjack_state,
-    generate_episode,
     inspect_environment,
+)
+from experiments.monte_carlo.run import (
+    generate_episode as generate_monte_carlo_episode,
+)
+from experiments.policy_gradient.run import (
+    generate_episode as generate_policy_gradient_episode,
+)
+from experiments.policy_gradient.run import (
+    make_agent,
+    make_environment,
 )
 from rl_lib.algorithms.function_approximation import (
     SemiGradientQLearning,
     SemiGradientSARSA,
 )
 from rl_lib.algorithms.monte_carlo import FirstVisitMonteCarloControl
+from rl_lib.algorithms.policy_gradient import A2C, ReinforceWithBaseline
+from rl_lib.data import EpisodeStep
 from rl_lib.models import ActionValueNetwork
 
 
@@ -40,7 +51,7 @@ def test_nonstationary_bandit_drifts_after_step() -> None:
 def test_monte_carlo_control_interacts_with_blackjack() -> None:
     env = gym.make("Blackjack-v1")
     agent = FirstVisitMonteCarloControl(BLACKJACK_STATES, BLACKJACK_ACTIONS, seed=0)
-    episode = generate_episode(
+    episode = generate_monte_carlo_episode(
         env,
         agent.select_action,
         seed=0,
@@ -57,7 +68,7 @@ def test_monte_carlo_control_interacts_with_taxi() -> None:
     states, actions, encoder, _ = inspect_environment("Taxi-v4")
     env = gym.make("Taxi-v4")
     agent = FirstVisitMonteCarloControl(states, actions, seed=0)
-    episode = generate_episode(
+    episode = generate_monte_carlo_episode(
         env,
         agent.select_action,
         seed=0,
@@ -129,16 +140,66 @@ def test_function_approximation_agents_interact_with_gymnasium(
     if isinstance(agent, SemiGradientSARSA):
         next_action = None if terminated else agent.select_action(next_observation)
         agent.update(
-            observation,
-            action,
-            reward,
+            (EpisodeStep(observation, action, reward),),
             next_observation,
             next_action,
-            terminated,
+            terminated=terminated,
         )
     else:
-        agent.update(observation, action, reward, next_observation, terminated)
+        agent.update(
+            (EpisodeStep(observation, action, reward),),
+            next_observation,
+            terminated=terminated,
+        )
 
     assert truncated
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ("reinforce", "reinforce_with_baseline", "a2c"),
+)
+def test_policy_gradient_agents_interact_with_gymnasium(algorithm: str) -> None:
+    env = make_environment("CartPole-v1", max_episode_steps=1)
+    agent = make_agent(
+        algorithm,
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.001,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.0,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    episode = generate_policy_gradient_episode(
+        env,
+        agent,
+        environment_seed=0,
+        action_seed=0,
+    )
+
+    if isinstance(agent, A2C):
+        losses = agent.update(
+            episode.steps,
+            episode.final_state,
+            terminated=episode.terminated,
+        )
+    else:
+        losses = (agent.update(episode),)
+
+    assert episode.terminated or episode.truncated
+    assert len(episode.steps) == 1
+    assert np.all(np.isfinite(losses))
+    assert all(
+        torch.isfinite(parameter).all() for parameter in agent.actor_model.parameters()
+    )
+    if isinstance(agent, (ReinforceWithBaseline, A2C)):
+        assert all(
+            torch.isfinite(parameter).all()
+            for parameter in agent.critic_model.parameters()
+        )
     env.close()

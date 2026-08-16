@@ -23,7 +23,7 @@ class FirstVisitMonteCarloPrediction:
         self.visit_counts = np.zeros(number_of_states, dtype=int)
         self.V = np.zeros(number_of_states, dtype=float)
 
-    def update(self, episode: Episode) -> None:
+    def update(self, episode: Episode[int]) -> None:
         """Update estimates from one complete episode."""
         rewards = [step.reward for step in episode.steps]
         returns = discounted_returns(rewards, self.discount)
@@ -60,7 +60,7 @@ class EveryVisitMonteCarloPrediction:
         self.visit_counts = np.zeros(number_of_states, dtype=int)
         self.V = np.zeros(number_of_states, dtype=float)
 
-    def update(self, episode: Episode) -> None:
+    def update(self, episode: Episode[int]) -> None:
         """Update estimates from one complete episode."""
         rewards = [step.reward for step in episode.steps]
         returns = discounted_returns(rewards, self.discount)

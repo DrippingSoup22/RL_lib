@@ -50,7 +50,7 @@ class FirstVisitMonteCarloControl:
     def select_action(self, state: int) -> int:
         return self.policy.select_action(state)
 
-    def update(self, episode: Episode) -> None:
+    def update(self, episode: Episode[int]) -> None:
         """Update action values and improve the policy from one episode."""
 
         # Monte Carlo policy evaluation
@@ -133,7 +133,7 @@ class EveryVisitMonteCarloControl:
     def select_action(self, state: int) -> int:
         return self.policy.select_action(state)
 
-    def update(self, episode: Episode) -> None:
+    def update(self, episode: Episode[int]) -> None:
         """Update action values and improve the policy from one episode."""
 
         # Monte Carlo policy evaluation

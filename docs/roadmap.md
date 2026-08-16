@@ -4,9 +4,9 @@
 | ---: | --- | --- | --- |
 | 1 | Stationary/nonstationary epsilon-greedy and UCB bandits | Stationary / drifting Gaussian bandit | Implemented |
 | 2 | First/every visit Monte Carlo prediction and control | `Blackjack-v1` / `Taxi-v4` | Implemented |
-| 3 | TD(0), SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Implemented |
-| 4 | Semi-gradient TD(0), SARSA, and Q-learning | `Acrobot-v1` / `MountainCar-v0` | Implemented; Acrobot standard validation complete |
-| 5 | REINFORCE with baseline and A2C | `CartPole-v1` / `Acrobot-v1` | Planned |
+| 3 | One-step and bounded-rollout TD prediction, SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Implemented |
+| 4 | Semi-gradient one-step and bounded-rollout TD, SARSA, and Q-learning | `Acrobot-v1` / `MountainCar-v0` | Implemented; Acrobot standard validation complete |
+| 5 | REINFORCE with baseline and A2C | `CartPole-v1` / `Acrobot-v1` | Implemented; A2C standard validation pending |
 | 6 | A3C, PPO, TRPO | `CartPole-v1` / `Pendulum-v1` | Planned |
 
 For each family: implement the variants, add minimal equation-level tests, run

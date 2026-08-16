@@ -1,3 +1,5 @@
+import gymnasium as gym
+import numpy as np
 import pytest
 import torch
 
@@ -7,6 +9,8 @@ from experiments.function_approximation.run import (
     copy_model_state,
     evaluation_score,
     linearly_decayed_epsilon,
+    make_agent,
+    train_episode,
 )
 
 
@@ -77,3 +81,38 @@ def test_model_snapshot_is_independent_and_restorable() -> None:
 
     torch.testing.assert_close(model.weight, torch.tensor([[2.0]]))
     torch.testing.assert_close(model.bias, torch.tensor([3.0]))
+
+
+@pytest.mark.parametrize("algorithm", ("sarsa", "q_learning"))
+def test_function_approximation_runner_flushes_n_step_truncation(
+    algorithm: str,
+) -> None:
+    env = gym.wrappers.RescaleObservation(
+        gym.make("MountainCar-v0", max_episode_steps=1),
+        np.float32(-1.0),
+        np.float32(1.0),
+    )
+    agent = make_agent(
+        algorithm,
+        env,
+        learning_rate=0.001,
+        discount=0.99,
+        epsilon=0.1,
+        optimizer_name="sgd",
+        hidden_sizes=(4,),
+        seed=0,
+    )
+
+    result = train_episode(
+        env,
+        agent,
+        seed=0,
+        rollout_steps=3,
+        collect_diagnostics=True,
+    )
+
+    assert result.truncated
+    assert result.episode_length == 1
+    assert result.diagnostics is not None
+    assert np.isfinite(result.diagnostics.mean_absolute_td_error)
+    env.close()

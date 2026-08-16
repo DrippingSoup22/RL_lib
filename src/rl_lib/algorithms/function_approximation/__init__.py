@@ -5,11 +5,11 @@ from rl_lib.algorithms.function_approximation.control import (
     SemiGradientSARSA,
 )
 from rl_lib.algorithms.function_approximation.prediction import (
-    SemiGradientTDZeroPrediction,
+    SemiGradientTDPrediction,
 )
 
 __all__ = [
     "SemiGradientQLearning",
     "SemiGradientSARSA",
-    "SemiGradientTDZeroPrediction",
+    "SemiGradientTDPrediction",
 ]

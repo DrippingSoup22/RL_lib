@@ -15,10 +15,10 @@ build/
 dist/
 
 # Local experiment output
-artifacts/
-runs/*
-!runs/.gitkeep
-videos/
+/artifacts/
+/results/
+/runs/
+/videos/
 
 # Editors and operating systems
 .idea/

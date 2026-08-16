@@ -9,12 +9,12 @@ first principles and validates them with Gymnasium experiments.
 | --- | --- |
 | Bandits | Epsilon-greedy and UCB; stationary and nonstationary |
 | Monte Carlo | First/every visit prediction and epsilon-greedy control |
-| Temporal difference | TD(0), SARSA, and Q-learning |
-| Function approximation | Semi-gradient TD(0), SARSA, and Q-learning |
+| Temporal difference | One-step and bounded-rollout TD prediction, SARSA, and Q-learning |
+| Function approximation | Semi-gradient one-step and bounded-rollout TD, SARSA, and Q-learning |
 | Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
 
-Bandits, Monte Carlo, tabular temporal-difference, and function-approximation
-methods are implemented currently. See
+Bandits, Monte Carlo, tabular temporal-difference, function approximation, the
+two REINFORCE variants, and A2C are implemented currently. See
 [`docs/roadmap.md`](docs/roadmap.md) for the planned order.
 
 ## Structure
@@ -48,9 +48,13 @@ make mc
 make mc ARGS="--environment Taxi-v4"
 make td
 make td ARGS="--environment FrozenLake-v1"
+make td ARGS="--preset quick --rollout 5"
 make fa ARGS="-p quick"
 make fa ARGS="-e MountainCar-v0 -p quick"
 make fa ARGS="-p tuning --lr 0.001 --eps 0.1"
+make fa ARGS="-p quick --rollout 5"
+make pg ARGS="-p quick"
+make pg ARGS="-e Acrobot-v1 -p tuning"
 ```
 
 Run `make help` to see every experiment shortcut and accepted argument.
@@ -65,3 +69,6 @@ evaluation recordings. Gymnasium outputs live under
 `runs/<family>/<environment>/<timestamp>/`; the multi-condition bandit runner
 uses `runs/bandits/<timestamp>/`. Standard runs record behavior at 25%, 50%,
 75%, and 100%; quick runs record only 100%.
+For non-bandit experiments, those recordings come from the seed with the best
+final frozen evaluation. Summaries report every seed separately as well as the
+across-seed aggregate.

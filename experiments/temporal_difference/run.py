@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import gymnasium as gym
@@ -16,6 +17,7 @@ from experiments.common import (
     annotated_frame,
     checkpoint_episode_target,
     create_run_directory,
+    recording_title,
     write_csv,
     write_metadata,
 )
@@ -23,8 +25,9 @@ from experiments.summary import SummaryMedia, SummaryTable, write_summary
 from rl_lib.algorithms.temporal_difference import (
     SARSA,
     QLearning,
-    TDZeroPrediction,
+    TDPrediction,
 )
+from rl_lib.data import EpisodeStep
 
 CSV_FIELDS = (
     "phase",
@@ -139,8 +142,9 @@ def run_prediction(
     episodes: int,
     learning_rate: float,
     discount: float,
+    rollout_steps: int,
 ) -> list[dict[str, object]]:
-    estimator = TDZeroPrediction(
+    estimator = TDPrediction(
         number_of_states,
         learning_rate=learning_rate,
         discount=discount,
@@ -151,20 +155,24 @@ def run_prediction(
     for episode in range(episodes):
         observation, _ = env.reset(seed=episode)
         state = int(observation)
+        rollout: list[EpisodeStep[int]] = []
         terminated = truncated = False
         while not (terminated or truncated):
             action = fixed_prediction_action(environment, rng, state)
             next_observation, reward, terminated, truncated, _ = env.step(action)
             next_state = int(next_observation)
-            estimator.update(state, float(reward), next_state, terminated)
+            rollout.append(EpisodeStep(state, action, float(reward)))
             visits[state] += 1
             state = next_state
+            if len(rollout) == rollout_steps or terminated or truncated:
+                estimator.update(tuple(rollout), state, terminated=terminated)
+                rollout.clear()
     env.close()
 
     return [
         {
             "phase": "prediction",
-            "algorithm": "td_zero",
+            "algorithm": "n_step_td",
             "seed": 0,
             "checkpoint": 100,
             "state": state,
@@ -185,27 +193,33 @@ def train_episode(
     agent: SARSA | QLearning,
     algorithm: str,
     seed: int,
+    rollout_steps: int,
 ) -> None:
     observation, _ = env.reset(seed=seed)
     state = int(observation)
     action = agent.select_action(state)
+    rollout: list[EpisodeStep[int]] = []
     terminated = truncated = False
     while not (terminated or truncated):
         next_observation, reward, terminated, truncated, _ = env.step(action)
         next_state = int(next_observation)
+        rollout.append(EpisodeStep(state, action, float(reward)))
         if algorithm == "sarsa":
             next_action = None if terminated else agent.select_action(next_state)
-            agent.update(
-                state,
-                action,
-                float(reward),
-                next_state,
-                next_action,
-                terminated,
-            )
-        else:
-            agent.update(state, action, float(reward), next_state, terminated)
+            if len(rollout) == rollout_steps or terminated or truncated:
+                agent.update(
+                    tuple(rollout),
+                    next_state,
+                    next_action,
+                    terminated=terminated,
+                )
+                rollout.clear()
+        elif len(rollout) == rollout_steps or terminated or truncated:
+            agent.update(tuple(rollout), next_state, terminated=terminated)
+            rollout.clear()
             next_action = None if terminated else agent.select_action(next_state)
+        else:
+            next_action = agent.select_action(next_state)
 
         if not (terminated or truncated):
             state = next_state
@@ -267,6 +281,7 @@ def record_evaluation(
     Q: np.ndarray,
     seed: int,
 ) -> None:
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     env = make_environment(environment, configuration, render_mode="rgb_array")
     rng = np.random.default_rng(seed)
     observation, _ = env.reset(seed=seed)
@@ -308,17 +323,20 @@ def run_control(
     learning_rate: float,
     discount: float,
     epsilon: float,
+    rollout_steps: int,
     recordings_directory: Path,
     metrics_path: Path,
     initial_rows: list[dict[str, object]],
     recording_checkpoints: tuple[int, ...],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, int]]:
     rows = initial_rows.copy()
+    selected_recording_seeds: dict[str, int] = {}
     algorithms: tuple[tuple[str, type[SARSA] | type[QLearning]], ...] = (
         ("sarsa", SARSA),
         ("q_learning", QLearning),
     )
     for algorithm, agent_class in algorithms:
+        recording_values: dict[int, dict[int, np.ndarray]] = {}
         for seed, configuration in enumerate(configurations):
             print(f"{algorithm}: seed {seed + 1}/{len(configurations)}", flush=True)
             env = make_environment(environment, configuration)
@@ -347,6 +365,7 @@ def run_control(
                         agent,
                         algorithm,
                         seed=seed * training_episodes + completed_episodes,
+                        rollout_steps=rollout_steps,
                     )
                     completed_episodes += 1
 
@@ -370,17 +389,39 @@ def run_control(
                     }
                 )
                 write_csv(metrics_path, CSV_FIELDS, rows)
-                if seed == 0 and checkpoint in recording_checkpoints:
-                    record_evaluation(
-                        recordings_directory
-                        / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
-                        environment,
-                        configuration,
-                        agent.Q,
-                        seed=2_000_000 + checkpoint,
-                    )
+                if checkpoint in recording_checkpoints:
+                    recording_values.setdefault(seed, {})[checkpoint] = agent.Q.copy()
             env.close()
-    return rows
+
+        final_rows = [
+            row
+            for row in rows
+            if row["phase"] == "control"
+            and row["algorithm"] == algorithm
+            and row["checkpoint"] == 100
+        ]
+        selected_row = max(
+            final_rows,
+            key=lambda row: (float(row["mean_return"]), float(row["success_rate"])),
+        )
+        selected_seed = int(selected_row["seed"])
+        selected_recording_seeds[algorithm] = selected_seed
+        if recording_checkpoints:
+            print(
+                f"{algorithm}: recordings use best final seed {selected_seed}",
+                flush=True,
+            )
+            for checkpoint in recording_checkpoints:
+                record_evaluation(
+                    recordings_directory
+                    / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
+                    environment,
+                    configurations[selected_seed],
+                    recording_values[selected_seed][checkpoint],
+                    seed=2_000_000 + checkpoint,
+                )
+                print(f"  recorded checkpoint {checkpoint}%", flush=True)
+    return rows, selected_recording_seeds
 
 
 def aggregate_control_rows(
@@ -430,7 +471,7 @@ def write_figures(
     value_grid = V.reshape(-1, columns)
     figure, axis = plt.subplots(figsize=(9, 3.5))
     image = axis.imshow(value_grid, cmap="viridis", aspect="auto")
-    axis.set_title("TD(0) state-value estimates")
+    axis.set_title("Rollout TD state-value estimates")
     axis.set_xlabel("Column")
     axis.set_ylabel("Row")
     figure.colorbar(image, ax=axis, label="V(s)")
@@ -496,6 +537,24 @@ def write_outputs(
         if environment == "CliffWalking-v1":
             values += (f"{float(row['mean_cliff_falls']):.3f}",)
         control_table.append(values)
+    seed_table = []
+    for algorithm in ("sarsa", "q_learning"):
+        for row in rows:
+            if (
+                row["phase"] == "control"
+                and row["algorithm"] == algorithm
+                and row["checkpoint"] == 100
+            ):
+                seed_table.append(
+                    (
+                        algorithm,
+                        row["seed"],
+                        f"{float(row['mean_return']):.3f}",
+                        f"{float(row['success_rate']):.3f}",
+                        f"{float(row['mean_episode_length']):.2f}",
+                        f"{float(row['truncation_rate']):.3f}",
+                    )
+                )
     control_headers = (
         "Algorithm",
         "Training",
@@ -512,7 +571,7 @@ def write_outputs(
     ]
     recordings = tuple(
         SummaryMedia(
-            path.stem.replace("_checkpoint_", " - ").replace("_", " ") + "%",
+            recording_title(path, metadata["recording_seed_by_algorithm"]),
             path.relative_to(output),
         )
         for path in sorted((output / "recordings").glob("*.gif"))
@@ -523,7 +582,8 @@ def write_outputs(
         metadata={
             "Environment": environment,
             "Preset": metadata["preset"],
-            "TD(0) prediction episodes": metadata["prediction_episodes"],
+            "Prediction episodes": metadata["prediction_episodes"],
+            "Rollout length": metadata["rollout_steps"],
             "Control training episodes": metadata["training_episodes"],
             "Evaluation": (
                 f"{metadata['evaluation_episodes']} episodes per checkpoint and seed"
@@ -532,10 +592,11 @@ def write_outputs(
             "Learning rate": metadata["learning_rate"],
             "Discount": metadata["discount"],
             "Training epsilon": metadata["epsilon"],
+            "Recorded seed by algorithm": metadata["recording_seed_by_algorithm"],
         },
         tables=(
             SummaryTable(
-                "TD(0) prediction coverage",
+                "Rollout TD prediction coverage",
                 ("States", "Visited states", "Total visits", "Value range"),
                 (
                     (
@@ -555,12 +616,26 @@ def write_outputs(
                 control_headers,
                 control_table,
             ),
+            SummaryTable(
+                "Final control evaluation by seed",
+                (
+                    "Algorithm",
+                    "Seed",
+                    "Mean return",
+                    "Success rate",
+                    "Episode length",
+                    "Truncation rate",
+                ),
+                tuple(seed_table),
+            ),
         ),
         figures=(
             SummaryMedia(
                 "Control checkpoint evaluation", Path("figures/control_learning.png")
             ),
-            SummaryMedia("TD(0) state values", Path("figures/prediction_values.png")),
+            SummaryMedia(
+                "Rollout TD state values", Path("figures/prediction_values.png")
+            ),
         ),
         recordings=recordings,
     )
@@ -581,6 +656,16 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.1)
     parser.add_argument("--discount", type=float, default=1.0)
     parser.add_argument("--epsilon", type=float, default=0.1)
+    parser.add_argument(
+        "--rollout-steps",
+        "--rollout",
+        "--n-steps",
+        "--n-step",
+        dest="rollout_steps",
+        type=int,
+        default=1,
+        help="maximum transitions per TD rollout (default: 1)",
+    )
     parser.add_argument("--map-size", type=int, default=4)
     parser.add_argument("--safe-probability", type=float, default=0.8)
     parser.add_argument("--non-slippery", action="store_true")
@@ -611,6 +696,8 @@ def main() -> None:
         parser.error("discount must be finite and in [0, 1]")
     if not np.isfinite(args.epsilon) or not 0 <= args.epsilon <= 1:
         parser.error("epsilon must be finite and in [0, 1]")
+    if args.rollout_steps < 1:
+        parser.error("rollout steps must be positive")
     if args.map_size < 2:
         parser.error("map size must be at least 2")
     if not 0 < args.safe_probability <= 1:
@@ -642,6 +729,7 @@ def main() -> None:
         "learning_rate": args.learning_rate,
         "discount": args.discount,
         "epsilon": args.epsilon,
+        "rollout_steps": args.rollout_steps,
         "max_episode_steps": max_steps,
         "evaluation_checkpoints": list(EVALUATION_CHECKPOINTS),
         "recording_checkpoints": (
@@ -675,9 +763,10 @@ def main() -> None:
         prediction_episodes,
         args.learning_rate,
         args.discount,
+        args.rollout_steps,
     )
     write_csv(output / "metrics.csv", CSV_FIELDS, prediction_rows)
-    rows = run_control(
+    rows, selected_recording_seeds = run_control(
         args.environment,
         configurations,
         states,
@@ -687,11 +776,16 @@ def main() -> None:
         args.learning_rate,
         args.discount,
         args.epsilon,
+        args.rollout_steps,
         recordings,
         output / "metrics.csv",
         prediction_rows,
         (100,) if args.preset == "quick" else RECORDING_CHECKPOINTS,
     )
+    metadata["recording_seed_selection"] = (
+        "highest final mean evaluation return; success rate breaks ties"
+    )
+    metadata["recording_seed_by_algorithm"] = selected_recording_seeds
     write_outputs(output, rows, metadata)
     metadata["status"] = "complete"
     write_metadata(output / "metadata.json", metadata)

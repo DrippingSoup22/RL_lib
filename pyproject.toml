@@ -34,6 +34,9 @@ addopts = "-ra"
 pythonpath = ["."]
 testpaths = ["tests"]
 
+[tool.basedpyright]
+typeCheckingMode = "standard"
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"
