@@ -1,56 +1,59 @@
-"""Compare Monte Carlo and actor-critic policy gradients on Gymnasium."""
+"""Run one policy-gradient algorithm on a Gymnasium environment."""
 
 from __future__ import annotations
 
-import argparse
 import math
 import os
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from numpy.typing import NDArray
 from PIL import Image
 
 from experiments.common import (
-    EVALUATION_CHECKPOINTS,
-    RECORDING_CHECKPOINTS,
     annotated_frame,
     checkpoint_episode_target,
     create_run_directory,
-    recording_title,
+    evaluation_checkpoints,
     write_csv,
     write_metadata,
 )
-from experiments.summary import SummaryMedia, SummaryTable, write_summary
-from rl_lib.algorithms.policy_gradient import A2C, Reinforce, ReinforceWithBaseline
-from rl_lib.data import Episode, EpisodeStep
+from experiments.policy_gradient.configuration import (
+    ALGORITHM_LABELS,
+    ALGORITHMS,
+    ExperimentConfig,
+    initial_metadata,
+    parse_config,
+)
+from experiments.policy_gradient.environments import (
+    action_name,
+    episode_succeeded,
+    make_environment,
+    recording_frame_stride,
+)
+from experiments.policy_gradient.report import CSV_FIELDS, write_report
+from experiments.policy_gradient.runners.a2c import (
+    train_episode as train_a2c_episode,
+)
+from experiments.policy_gradient.runners.a3c import (
+    train_episodes as train_a3c_episodes,
+)
+from experiments.policy_gradient.runners.common import (
+    TrainingEpisodeResult,
+    generate_episode,
+    observation_array,
+)
+from experiments.policy_gradient.runners.ppo import PPOTrainingBatchResult
+from experiments.policy_gradient.runners.ppo import train_episodes as train_ppo_episodes
+from experiments.policy_gradient.runners.reinforce import (
+    train_episode as train_reinforce_episode,
+)
+from rl_lib.algorithms.policy_gradient import A2C, PPO, Reinforce, ReinforceWithBaseline
 from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
 
-ENVIRONMENTS = ("CartPole-v1", "Acrobot-v1")
-ALGORITHMS = ("reinforce", "reinforce_with_baseline", "a2c")
-ALGORITHM_LABELS = {
-    "reinforce": "REINFORCE",
-    "reinforce_with_baseline": "REINFORCE + baseline",
-    "a2c": "A2C",
-}
-PRESETS = ("quick", "tuning", "standard")
-DEFAULT_HIDDEN_SIZES = (64, 64)
-CSV_FIELDS = (
-    "algorithm",
-    "seed",
-    "checkpoint",
-    "evaluation_episode",
-    "episode_return",
-    "episode_length",
-    "success",
-    "terminated",
-    "truncated",
-)
 DIAGNOSTIC_FIELDS = (
     "algorithm",
     "seed",
@@ -66,34 +69,8 @@ DIAGNOSTIC_FIELDS = (
     "critic_loss",
     "policy_entropy",
 )
-Agent = Reinforce | ReinforceWithBaseline | A2C
-Observation = NDArray[np.float32]
+Agent = Reinforce | ReinforceWithBaseline | A2C | PPO
 ModelState = dict[str, torch.Tensor]
-
-
-@dataclass(frozen=True)
-class ExperimentConfig:
-    environment: str
-    preset: str
-    training_episodes: int
-    evaluation_episodes: int
-    seeds: int
-    algorithms: tuple[str, ...]
-    actor_learning_rate: float
-    actor_minimum_learning_rate: float
-    critic_learning_rate: float
-    critic_minimum_learning_rate: float
-    optimizer: str
-    weight_decay: float
-    warmup_episodes: int
-    warmup_start_factor: float
-    discount: float
-    a2c_rollout_steps: int
-    entropy_coefficient: float
-    hidden_sizes: tuple[int, ...]
-    diagnostics: bool
-    recording_mode: str
-    recording_checkpoints: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -103,45 +80,6 @@ class EvaluationResult:
     success: bool
     terminated: bool
     truncated: bool
-
-
-@dataclass(frozen=True)
-class TrainingEpisodeResult:
-    episode_return: float
-    episode_length: int
-    terminated: bool
-    truncated: bool
-    updates: int
-    actor_loss: float
-    critic_loss: float | None
-    policy_entropy: float | None
-
-
-def make_environment(
-    environment: str,
-    *,
-    render_mode: str | None = None,
-    max_episode_steps: int | None = None,
-) -> gym.Env:
-    """Create an environment compatible with the discrete policy network."""
-    if environment not in ENVIRONMENTS:
-        raise ValueError(f"environment must be one of {ENVIRONMENTS}")
-
-    env = gym.make(
-        environment,
-        render_mode=render_mode,
-        max_episode_steps=max_episode_steps,
-    )
-    if not isinstance(env.observation_space, gym.spaces.Box):
-        env.close()
-        raise ValueError("environment must have a continuous Box observation space")
-    if not isinstance(env.action_space, gym.spaces.Discrete):
-        env.close()
-        raise ValueError("environment must have a discrete action space")
-    if env.action_space.start != 0:
-        env.close()
-        raise ValueError("environment actions must start at zero")
-    return env
 
 
 def make_optimizer(
@@ -184,8 +122,9 @@ def make_agent(
     entropy_coefficient: float,
     hidden_sizes: tuple[int, ...],
     seed: int,
+    ppo_clip_ratio: float = 0.2,
 ) -> Agent:
-    """Build one policy-gradient agent with reproducible initialization."""
+    """Build an agent, or the shared actor-critic state used by A3C."""
     if algorithm not in ALGORITHMS:
         raise ValueError(f"algorithm must be one of {ALGORITHMS}")
     if not isinstance(env.observation_space, gym.spaces.Box):
@@ -226,6 +165,20 @@ def make_agent(
                 critic_optimizer,
                 discount,
             )
+        if algorithm == "ppo":
+            return PPO(
+                actor_model,
+                actor_optimizer,
+                critic_model,
+                critic_optimizer,
+                clip_ratio=ppo_clip_ratio,
+                entropy_coefficient=entropy_coefficient,
+                seed=seed,
+            )
+        if algorithm not in ("a2c", "a3c"):
+            raise ValueError(f"algorithm must be one of {ALGORITHMS}")
+        # A3C workers wrap these shared models in A3C. The parent keeps this
+        # synchronous container only for frozen evaluation and recordings.
         return A2C(
             actor_model,
             actor_optimizer,
@@ -264,129 +217,6 @@ def make_learning_rate_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_factor)
 
 
-def observation_array(observation: object, observation_size: int) -> Observation:
-    """Convert a Gymnasium observation to one owned, flat float32 array."""
-    result = np.asarray(observation, dtype=np.float32).reshape(-1)
-    if result.shape != (observation_size,):
-        raise ValueError("environment observation does not match the model input size")
-    if not np.all(np.isfinite(result)):
-        raise ValueError("environment observation must be finite")
-    return result.copy()
-
-
-def generate_episode(
-    env: gym.Env,
-    agent: Agent,
-    *,
-    environment_seed: int,
-    action_seed: int,
-) -> Episode[Observation]:
-    """Sample one complete episode without changing the agent."""
-    observation, _ = env.reset(seed=environment_seed)
-    state = observation_array(observation, agent.actor_model.observation_size)
-    steps: list[EpisodeStep[Observation]] = []
-    terminated = truncated = False
-
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(action_seed)
-        while not (terminated or truncated):
-            action = agent.select_action(state)
-            next_observation, reward, terminated, truncated, _ = env.step(action)
-            steps.append(EpisodeStep(state, action, float(reward)))
-            state = observation_array(
-                next_observation,
-                agent.actor_model.observation_size,
-            )
-
-    return Episode(
-        steps=tuple(steps),
-        final_state=state,
-        terminated=terminated,
-        truncated=truncated,
-    )
-
-
-def mean_policy_entropy(
-    agent: Agent,
-    steps: Sequence[EpisodeStep[Observation]],
-) -> float:
-    """Measure categorical-policy entropy on rollout observations."""
-    observations = torch.as_tensor(
-        np.asarray([step.state for step in steps], dtype=np.float32)
-    )
-    with torch.no_grad():
-        logits = agent.actor_model(observations)
-        entropy = torch.distributions.Categorical(logits=logits).entropy().mean()
-    return float(entropy.item())
-
-
-def train_a2c_episode(
-    env: gym.Env,
-    agent: A2C,
-    *,
-    rollout_steps: int,
-    environment_seed: int,
-    action_seed: int,
-    collect_diagnostics: bool,
-) -> TrainingEpisodeResult:
-    """Train A2C during one episode using bounded n-step rollouts."""
-    observation, _ = env.reset(seed=environment_seed)
-    state = observation_array(observation, agent.actor_model.observation_size)
-    rollout: list[EpisodeStep[Observation]] = []
-    terminated = truncated = False
-    episode_return = 0.0
-    episode_length = 0
-    updates = 0
-    weighted_actor_loss = 0.0
-    weighted_critic_loss = 0.0
-    weighted_entropy = 0.0
-
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(action_seed)
-        while not (terminated or truncated):
-            action = agent.select_action(state)
-            next_observation, reward, terminated, truncated, _ = env.step(action)
-            next_state = observation_array(
-                next_observation,
-                agent.actor_model.observation_size,
-            )
-            rollout.append(EpisodeStep(state, action, float(reward)))
-            episode_return += float(reward)
-            episode_length += 1
-            state = next_state
-
-            if len(rollout) < rollout_steps and not (terminated or truncated):
-                continue
-
-            rollout_size = len(rollout)
-            if collect_diagnostics:
-                weighted_entropy += mean_policy_entropy(agent, rollout) * rollout_size
-            actor_loss, critic_loss = agent.update(
-                tuple(rollout),
-                state,
-                terminated=terminated,
-            )
-            if not (math.isfinite(actor_loss) and math.isfinite(critic_loss)):
-                raise RuntimeError("A2C produced a non-finite loss")
-            weighted_actor_loss += actor_loss * rollout_size
-            weighted_critic_loss += critic_loss * rollout_size
-            updates += 1
-            rollout.clear()
-
-    return TrainingEpisodeResult(
-        episode_return=episode_return,
-        episode_length=episode_length,
-        terminated=terminated,
-        truncated=truncated,
-        updates=updates,
-        actor_loss=weighted_actor_loss / episode_length,
-        critic_loss=weighted_critic_loss / episode_length,
-        policy_entropy=(
-            weighted_entropy / episode_length if collect_diagnostics else None
-        ),
-    )
-
-
 def train_episode(
     env: gym.Env,
     agent: Agent,
@@ -407,40 +237,16 @@ def train_episode(
             collect_diagnostics=collect_diagnostics,
         )
 
-    episode = generate_episode(
+    if isinstance(agent, PPO):
+        raise TypeError("PPO must train a batch of episodes with train_ppo_episodes")
+
+    return train_reinforce_episode(
         env,
         agent,
         environment_seed=environment_seed,
         action_seed=action_seed,
+        collect_diagnostics=collect_diagnostics,
     )
-    entropy = mean_policy_entropy(agent, episode.steps) if collect_diagnostics else None
-    actor_loss = agent.update(episode)
-    if not math.isfinite(actor_loss):
-        raise RuntimeError("REINFORCE produced a non-finite loss")
-    return TrainingEpisodeResult(
-        episode_return=sum(step.reward for step in episode.steps),
-        episode_length=len(episode.steps),
-        terminated=episode.terminated,
-        truncated=episode.truncated,
-        updates=1,
-        actor_loss=actor_loss,
-        critic_loss=None,
-        policy_entropy=entropy,
-    )
-
-
-def episode_succeeded(
-    environment: str,
-    *,
-    terminated: bool,
-    truncated: bool,
-) -> bool:
-    """Interpret Gymnasium stopping conditions using environment semantics."""
-    if environment == "CartPole-v1":
-        return truncated and not terminated
-    if environment == "Acrobot-v1":
-        return terminated
-    raise ValueError(f"environment must be one of {ENVIRONMENTS}")
 
 
 def evaluate_episode(
@@ -471,6 +277,7 @@ def evaluate_episode(
             environment,
             terminated=episode.terminated,
             truncated=episode.truncated,
+            final_reward=episode.steps[-1].reward,
         ),
         terminated=episode.terminated,
         truncated=episode.truncated,
@@ -482,12 +289,6 @@ def rendered_frame(env: gym.Env, label: str) -> Image.Image:
     if not isinstance(frame, np.ndarray):
         raise RuntimeError("environment did not return an RGB frame")
     return annotated_frame(frame, label)
-
-
-def action_name(environment: str, action: int) -> str:
-    if environment == "CartPole-v1":
-        return ("push left", "push right")[action]
-    return ("negative torque", "no torque", "positive torque")[action]
 
 
 def record_evaluation(
@@ -545,271 +346,6 @@ def record_evaluation(
     )
 
 
-def experiment_defaults(environment: str, preset: str) -> dict[str, int]:
-    """Return experiment budgets; explicit CLI values can override each one."""
-    if preset == "quick":
-        return {
-            "training_episodes": 5,
-            "evaluation_episodes": 2,
-            "seeds": 1,
-        }
-    if preset == "tuning":
-        return {
-            "training_episodes": 1_000 if environment == "Acrobot-v1" else 500,
-            "evaluation_episodes": 10,
-            "seeds": 1,
-        }
-    return {
-        "training_episodes": 2_000 if environment == "Acrobot-v1" else 1_000,
-        "evaluation_episodes": 50,
-        "seeds": 3,
-    }
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    experiment = parser.add_argument_group("experiment")
-    experiment.add_argument(
-        "--environment",
-        "--env",
-        "-e",
-        choices=ENVIRONMENTS,
-        default=ENVIRONMENTS[0],
-    )
-    experiment.add_argument(
-        "--preset",
-        "-p",
-        choices=PRESETS,
-        default="standard",
-    )
-    experiment.add_argument("--training-episodes", "--train", type=int)
-    experiment.add_argument("--evaluation-episodes", "--eval", type=int)
-    experiment.add_argument("--seeds", "-n", type=int)
-    experiment.add_argument(
-        "--algorithms",
-        "--algorithm",
-        nargs="+",
-        choices=ALGORITHMS,
-        default=ALGORITHMS,
-        help="algorithms to run in the given order (default: all)",
-    )
-
-    optimization = parser.add_argument_group("optimization")
-    optimization.add_argument(
-        "--actor-learning-rate",
-        "--actor-lr",
-        "--lr",
-        type=float,
-        default=0.003,
-    )
-    optimization.add_argument(
-        "--actor-minimum-learning-rate",
-        "--actor-lr-min",
-        "--lr-min",
-        type=float,
-        help="minimum actor cosine learning rate (default: 1%% of --lr)",
-    )
-    optimization.add_argument(
-        "--critic-learning-rate",
-        "--critic-lr",
-        type=float,
-        default=0.01,
-    )
-    optimization.add_argument(
-        "--critic-minimum-learning-rate",
-        "--critic-lr-min",
-        type=float,
-        help="minimum critic cosine learning rate (default: 1%% of --critic-lr)",
-    )
-    optimization.add_argument(
-        "--optimizer",
-        "--opt",
-        "-o",
-        choices=("sgd", "adam", "adamw"),
-        default="adamw",
-    )
-    optimization.add_argument(
-        "--weight-decay",
-        "--wd",
-        type=float,
-        default=0.0001,
-        help="weight decay applied to actor and critic (default: 0.0001)",
-    )
-    optimization.add_argument(
-        "--warmup-episodes",
-        "--warmup",
-        type=int,
-        help="linear warmup episodes (default: 10%% of training; 0 disables)",
-    )
-    optimization.add_argument(
-        "--warmup-start-factor",
-        "--warmup-start",
-        type=float,
-        default=0.1,
-        help="initial fraction of each peak learning rate (default: 0.1)",
-    )
-    optimization.add_argument("--discount", "--gamma", type=float, default=0.99)
-
-    a2c = parser.add_argument_group("A2C")
-    a2c.add_argument(
-        "--a2c-rollout-steps",
-        "--rollout-steps",
-        "--rollout",
-        type=int,
-        default=5,
-        help="maximum transitions per A2C update (default: 5)",
-    )
-    a2c.add_argument(
-        "--entropy-coefficient",
-        "--entropy",
-        type=float,
-        default=0.0,
-        help="A2C entropy bonus coefficient (default: 0)",
-    )
-
-    model = parser.add_argument_group("model")
-    model.add_argument(
-        "--hidden-sizes",
-        "--hidden",
-        type=int,
-        nargs="+",
-        default=DEFAULT_HIDDEN_SIZES,
-        metavar="N",
-    )
-
-    output = parser.add_argument_group("output")
-    output.add_argument(
-        "--recordings",
-        "--record",
-        "-r",
-        choices=("none", "final", "checkpoints"),
-    )
-    output.add_argument(
-        "--diagnostics",
-        "--diag",
-        action="store_true",
-        help="write compact per-training-episode diagnostics",
-    )
-    return parser
-
-
-def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    defaults = experiment_defaults(args.environment, args.preset)
-
-    training_episodes = (
-        defaults["training_episodes"]
-        if args.training_episodes is None
-        else args.training_episodes
-    )
-    evaluation_episodes = (
-        defaults["evaluation_episodes"]
-        if args.evaluation_episodes is None
-        else args.evaluation_episodes
-    )
-    seeds = defaults["seeds"] if args.seeds is None else args.seeds
-    if min(training_episodes, evaluation_episodes, seeds) < 1:
-        parser.error(
-            "training episodes, evaluation episodes, and seeds must be positive"
-        )
-    algorithms = tuple(args.algorithms)
-    if len(set(algorithms)) != len(algorithms):
-        parser.error("algorithms must not contain duplicates")
-
-    actor_learning_rate = args.actor_learning_rate
-    critic_learning_rate = (
-        actor_learning_rate
-        if args.critic_learning_rate is None
-        else args.critic_learning_rate
-    )
-    if not math.isfinite(actor_learning_rate) or actor_learning_rate <= 0:
-        parser.error("actor learning rate must be finite and positive")
-    if not math.isfinite(critic_learning_rate) or critic_learning_rate <= 0:
-        parser.error("critic learning rate must be finite and positive")
-    actor_minimum_learning_rate = (
-        actor_learning_rate * 0.01
-        if args.actor_minimum_learning_rate is None
-        else args.actor_minimum_learning_rate
-    )
-    critic_minimum_learning_rate = (
-        critic_learning_rate * 0.01
-        if args.critic_minimum_learning_rate is None
-        else args.critic_minimum_learning_rate
-    )
-    if (
-        not math.isfinite(actor_minimum_learning_rate)
-        or actor_minimum_learning_rate < 0
-        or actor_minimum_learning_rate > actor_learning_rate
-    ):
-        parser.error("actor minimum learning rate must be between 0 and --lr")
-    if (
-        not math.isfinite(critic_minimum_learning_rate)
-        or critic_minimum_learning_rate < 0
-        or critic_minimum_learning_rate > critic_learning_rate
-    ):
-        parser.error("critic minimum learning rate must be between 0 and --critic-lr")
-    if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
-        parser.error("weight decay must be finite and nonnegative")
-    warmup_episodes = (
-        min(max(1, round(training_episodes * 0.1)), training_episodes - 1)
-        if args.warmup_episodes is None and training_episodes > 1
-        else (0 if args.warmup_episodes is None else args.warmup_episodes)
-    )
-    if not 0 <= warmup_episodes < training_episodes:
-        parser.error("warmup episodes must be between 0 and training episodes - 1")
-    if (
-        not math.isfinite(args.warmup_start_factor)
-        or not 0 < args.warmup_start_factor <= 1
-    ):
-        parser.error("warmup start factor must be finite and in (0, 1]")
-    if not math.isfinite(args.discount) or not 0 <= args.discount <= 1:
-        parser.error("discount must be finite and in [0, 1]")
-    if args.a2c_rollout_steps < 1:
-        parser.error("A2C rollout steps must be positive")
-    if not math.isfinite(args.entropy_coefficient) or args.entropy_coefficient < 0:
-        parser.error("entropy coefficient must be finite and nonnegative")
-    if any(hidden_size <= 0 for hidden_size in args.hidden_sizes):
-        parser.error("hidden sizes must be positive")
-
-    recording_mode = args.recordings
-    if recording_mode is None:
-        recording_mode = {
-            "quick": "final",
-            "tuning": "none",
-            "standard": "checkpoints",
-        }[args.preset]
-    recording_checkpoints = {
-        "none": (),
-        "final": (100,),
-        "checkpoints": RECORDING_CHECKPOINTS,
-    }[recording_mode]
-
-    return ExperimentConfig(
-        environment=args.environment,
-        preset=args.preset,
-        training_episodes=training_episodes,
-        evaluation_episodes=evaluation_episodes,
-        seeds=seeds,
-        algorithms=algorithms,
-        actor_learning_rate=actor_learning_rate,
-        actor_minimum_learning_rate=actor_minimum_learning_rate,
-        critic_learning_rate=critic_learning_rate,
-        critic_minimum_learning_rate=critic_minimum_learning_rate,
-        optimizer=args.optimizer,
-        weight_decay=args.weight_decay,
-        warmup_episodes=warmup_episodes,
-        warmup_start_factor=args.warmup_start_factor,
-        discount=args.discount,
-        a2c_rollout_steps=args.a2c_rollout_steps,
-        entropy_coefficient=args.entropy_coefficient,
-        hidden_sizes=tuple(args.hidden_sizes),
-        diagnostics=args.diagnostics,
-        recording_mode=recording_mode,
-        recording_checkpoints=recording_checkpoints,
-    )
-
-
 def evaluation_row(
     algorithm: str,
     seed: int,
@@ -840,9 +376,41 @@ def optimizer_learning_rate(optimizer: torch.optim.Optimizer) -> float:
 
 def critic_optimizer(agent: Agent) -> torch.optim.Optimizer | None:
     """Return the critic optimizer used by baseline and actor-critic agents."""
-    if isinstance(agent, (ReinforceWithBaseline, A2C)):
+    if isinstance(agent, (ReinforceWithBaseline, A2C, PPO)):
         return agent.critic_optimizer
     return None
+
+
+def ppo_episode_training_results(
+    batch: PPOTrainingBatchResult,
+    *,
+    collect_diagnostics: bool,
+) -> tuple[TrainingEpisodeResult, ...]:
+    """Attach batch-level PPO diagnostics to each episode for shared reporting."""
+    if not batch.episodes:
+        raise ValueError("PPO training batches must contain at least one episode")
+    actor_loss = float(
+        np.mean([update.actor_loss for update in batch.minibatch_updates])
+    )
+    critic_loss = float(
+        np.mean([update.critic_loss for update in batch.minibatch_updates])
+    )
+    entropy = float(np.mean([update.entropy for update in batch.minibatch_updates]))
+    updates_per_episode = len(batch.minibatch_updates) / len(batch.episodes)
+
+    return tuple(
+        TrainingEpisodeResult(
+            episode_return=episode.episode_return,
+            episode_length=episode.episode_length,
+            terminated=episode.terminated,
+            truncated=episode.truncated,
+            updates=updates_per_episode,
+            actor_loss=actor_loss,
+            critic_loss=critic_loss,
+            policy_entropy=entropy if collect_diagnostics else None,
+        )
+        for episode in batch.episodes
+    )
 
 
 def diagnostic_row(
@@ -924,13 +492,12 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         flush=True,
     )
     print(
-        f"  Seeds       : {config.seeds} independent "
-        f"{'run' if config.seeds == 1 else 'runs'}; fresh network each run",
+        f"  Seed trials : {config.seeds}; values={list(config.seed_values)}; "
+        "fresh network each trial",
         flush=True,
     )
     print(
-        "  Algorithms  : "
-        + ", ".join(ALGORITHM_LABELS[algorithm] for algorithm in config.algorithms),
+        f"  Algorithm   : {ALGORITHM_LABELS[config.algorithm]}",
         flush=True,
     )
     print(
@@ -948,11 +515,26 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         flush=True,
     )
     print(f"  Warmup      : {warmup}", flush=True)
-    print(
-        f"  A2C         : rollout={config.a2c_rollout_steps} steps; "
-        f"entropy coefficient={config.entropy_coefficient:g}",
-        flush=True,
-    )
+    if config.algorithm == "ppo":
+        print(
+            f"  PPO batch    : {config.ppo_batch_episodes} complete episodes; "
+            f"{config.ppo_update_epochs} epochs; "
+            f"minibatch={config.ppo_minibatch_size}",
+            flush=True,
+        )
+        print(
+            f"  PPO objective: clip={config.ppo_clip_ratio:g}; "
+            f"GAE lambda={config.gae_lambda:g}; "
+            f"entropy coefficient={config.entropy_coefficient:g}",
+            flush=True,
+        )
+    else:
+        print(
+            f"  Actor-critic: rollout={config.rollout_steps} steps; "
+            f"entropy coefficient={config.entropy_coefficient:g}; "
+            f"A3C workers={config.a3c_workers}",
+            flush=True,
+        )
     print(
         "  Diagnostics : "
         + ("training_diagnostics.csv" if config.diagnostics else "off"),
@@ -962,7 +544,7 @@ def print_experiment_header(config: ExperimentConfig) -> None:
 
 def print_final_evaluation(
     rows: list[dict[str, object]],
-    algorithms: Sequence[str] = ALGORITHMS,
+    algorithms: Sequence[str],
 ) -> None:
     """Print final per-seed measurements and their across-seed aggregate."""
     final_rows = [row for row in rows if int(row["checkpoint"]) == 100]
@@ -1027,388 +609,56 @@ def print_final_evaluation(
     print("", flush=True)
 
 
-def aggregate_rows(
-    rows: list[dict[str, object]],
-    algorithms: Sequence[str] = ALGORITHMS,
-) -> list[dict[str, object]]:
-    """Aggregate episode measurements after first averaging within each seed."""
-    aggregate: list[dict[str, object]] = []
-    metrics = ("episode_return", "episode_length", "success", "truncated")
-    for algorithm in algorithms:
-        for checkpoint in EVALUATION_CHECKPOINTS:
-            selected = [
-                row
-                for row in rows
-                if row["algorithm"] == algorithm and row["checkpoint"] == checkpoint
-            ]
-            if not selected:
-                continue
-
-            seed_means: dict[str, list[float]] = {metric: [] for metric in metrics}
-            for seed in sorted({int(row["seed"]) for row in selected}):
-                seed_rows = [row for row in selected if int(row["seed"]) == seed]
-                for metric in metrics:
-                    seed_means[metric].append(
-                        float(np.mean([float(row[metric]) for row in seed_rows]))
-                    )
-
-            result: dict[str, object] = {
-                "algorithm": algorithm,
-                "checkpoint": checkpoint,
-                "seeds": len(seed_means["episode_return"]),
-            }
-            for metric, values_list in seed_means.items():
-                values = np.asarray(values_list, dtype=float)
-                result[metric] = float(np.mean(values))
-                result[f"{metric}_std"] = (
-                    float(np.std(values, ddof=1)) if values.size > 1 else 0.0
-                )
-            aggregate.append(result)
-    return aggregate
-
-
-def write_figure(path: Path, aggregate: list[dict[str, object]]) -> None:
-    """Plot frozen evaluation return and success over training checkpoints."""
-    figure, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for algorithm in ALGORITHMS:
-        selected = [row for row in aggregate if row["algorithm"] == algorithm]
-        if not selected:
-            continue
-        checkpoints = np.asarray([row["checkpoint"] for row in selected], dtype=float)
-        for axis, metric in zip(
-            axes,
-            ("episode_return", "success"),
-            strict=True,
-        ):
-            means = np.asarray([row[metric] for row in selected], dtype=float)
-            standard_errors = np.asarray(
-                [
-                    float(row[f"{metric}_std"]) / np.sqrt(float(row["seeds"]))
-                    for row in selected
-                ]
-            )
-            (line,) = axis.plot(
-                checkpoints,
-                means,
-                marker="o",
-                label=ALGORITHM_LABELS[algorithm],
-            )
-            axis.fill_between(
-                checkpoints,
-                means - 1.96 * standard_errors,
-                means + 1.96 * standard_errors,
-                color=line.get_color(),
-                alpha=0.12,
-            )
-
-    axes[0].set_ylabel("Episode return")
-    axes[1].set_ylabel("Success rate")
-    axes[1].set_ylim(-0.02, 1.02)
-    for axis in axes:
-        axis.set_xlabel("Training completed (%)")
-        axis.set_xticks(EVALUATION_CHECKPOINTS)
-        axis.grid(alpha=0.25)
-        axis.legend()
-    figure.suptitle("Frozen stochastic-policy evaluation")
-    figure.tight_layout()
-    figure.savefig(path, dpi=150)
-    plt.close(figure)
-
-
-def mean_and_std(row: dict[str, object], metric: str) -> str:
-    return f"{float(row[metric]):.3f} +/- {float(row[f'{metric}_std']):.3f}"
-
-
-def final_seed_table(rows: list[dict[str, object]]) -> SummaryTable:
-    """Show the final frozen evaluation separately for every seed."""
-    values = []
-    for algorithm in ALGORITHMS:
-        for seed in sorted({int(row["seed"]) for row in rows}):
-            selected = [
-                row
-                for row in rows
-                if row["algorithm"] == algorithm
-                and int(row["seed"]) == seed
-                and int(row["checkpoint"]) == 100
-            ]
-            if selected:
-                mean_return = np.mean(
-                    [float(row["episode_return"]) for row in selected]
-                )
-                mean_success = np.mean([float(row["success"]) for row in selected])
-                mean_length = np.mean(
-                    [float(row["episode_length"]) for row in selected]
-                )
-                values.append(
-                    (
-                        ALGORITHM_LABELS[algorithm],
-                        seed,
-                        f"{mean_return:.3f}",
-                        f"{mean_success:.3f}",
-                        f"{mean_length:.2f}",
-                    )
-                )
-    return SummaryTable(
-        "Final evaluation by seed",
-        ("Algorithm", "Seed", "Mean return", "Success rate", "Episode length"),
-        tuple(values),
-    )
-
-
-def serialized_bounds(bounds: np.ndarray) -> list[float | str]:
-    """Represent unbounded Box limits without non-standard JSON numbers."""
-    result: list[float | str] = []
-    for value in bounds.reshape(-1):
-        if np.isneginf(value):
-            result.append("-Infinity")
-        elif np.isposinf(value):
-            result.append("Infinity")
-        else:
-            result.append(float(value))
-    return result
-
-
-def write_outputs(
-    output: Path,
-    config: ExperimentConfig,
-    rows: list[dict[str, object]],
-    metadata: dict[str, object],
-) -> None:
-    """Write final raw data, measured figures, and the deterministic summary."""
-    write_csv(output / "metrics.csv", CSV_FIELDS, rows)
-    write_metadata(output / "metadata.json", metadata)
-
-    aggregate = aggregate_rows(rows, config.algorithms)
-    write_figure(output / "figures" / "checkpoint_evaluation.png", aggregate)
-    table_rows = tuple(
-        (
-            ALGORITHM_LABELS[str(row["algorithm"])],
-            f"{row['checkpoint']}%",
-            mean_and_std(row, "episode_return"),
-            mean_and_std(row, "episode_length"),
-            mean_and_std(row, "success"),
-            mean_and_std(row, "truncated"),
-        )
-        for row in aggregate
-    )
-    recordings = tuple(
-        SummaryMedia(
-            recording_title(path, metadata["recording_seed_by_algorithm"]),
-            path.relative_to(output),
-        )
-        for path in sorted((output / "recordings").glob("*.gif"))
-    )
-    write_summary(
-        output / "summary.html",
-        title=f"Policy gradients on {config.environment}",
-        metadata={
-            "Environment": config.environment,
-            "Preset": config.preset,
-            "Training episodes": config.training_episodes,
-            "Evaluation": (
-                f"{config.evaluation_episodes} episodes per checkpoint and seed"
-            ),
-            "Seeds": config.seeds,
-            "Network": (
-                f"actor MLP with hidden sizes {list(config.hidden_sizes)}; "
-                "baseline and A2C critics use the same sizes"
-            ),
-            "Optimizer": {
-                "adam": "Adam",
-                "adamw": "AdamW",
-                "sgd": "SGD",
-            }[config.optimizer],
-            "Actor learning rate": (
-                f"{config.actor_learning_rate} to "
-                f"{config.actor_minimum_learning_rate} (cosine)"
-            ),
-            "Critic learning rate": (
-                f"{config.critic_learning_rate} to "
-                f"{config.critic_minimum_learning_rate} (cosine)"
-            ),
-            "Weight decay": config.weight_decay,
-            "Warmup": (
-                f"{config.warmup_episodes} episodes from "
-                f"{config.warmup_start_factor:g}x peak learning rate"
-                if config.warmup_episodes
-                else "disabled"
-            ),
-            "Discount": config.discount,
-            "A2C rollout": f"up to {config.a2c_rollout_steps} transitions",
-            "A2C entropy coefficient": config.entropy_coefficient,
-            "Training diagnostics": (
-                "training_diagnostics.csv" if config.diagnostics else "disabled"
-            ),
-            "Evaluation policy": "frozen stochastic policy",
-            "Success": metadata["success_definition"],
-            "Observations": "raw, flattened float32",
-            "Recorded seed by algorithm": metadata["recording_seed_by_algorithm"],
-        },
-        tables=(
-            SummaryTable(
-                "Frozen-policy evaluation",
-                (
-                    "Algorithm",
-                    "Training budget",
-                    "Episode return",
-                    "Episode length",
-                    "Success rate",
-                    "Truncation rate",
-                ),
-                table_rows,
-            ),
-            final_seed_table(rows),
-        ),
-        figures=(
-            SummaryMedia(
-                "Evaluation return and success",
-                Path("figures/checkpoint_evaluation.png"),
-            ),
-        ),
-        recordings=recordings,
-    )
-
-
-def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
-    """Build the runner-owned part of the reproducibility metadata."""
-    inspection_env = make_environment(config.environment)
-    assert isinstance(inspection_env.observation_space, gym.spaces.Box)
-    assert isinstance(inspection_env.action_space, gym.spaces.Discrete)
-    max_episode_steps = (
-        inspection_env.spec.max_episode_steps
-        if inspection_env.spec is not None
-        else None
-    )
-    observation_shape = list(inspection_env.observation_space.shape)
-    observation_low = serialized_bounds(inspection_env.observation_space.low)
-    observation_high = serialized_bounds(inspection_env.observation_space.high)
-    number_of_actions = int(inspection_env.action_space.n)
-    inspection_env.close()
-
-    success_definition = (
-        "reaches the time limit without true termination"
-        if config.environment == "CartPole-v1"
-        else "true termination after the Acrobot reaches the target height"
-    )
-    metadata = asdict(config)
-    metadata.update(
-        {
-            "status": "running",
-            "algorithms": list(config.algorithms),
-            "evaluation_checkpoints": list(EVALUATION_CHECKPOINTS),
-            "recording_checkpoints": list(config.recording_checkpoints),
-            "observation_shape": observation_shape,
-            "observation_low": observation_low,
-            "observation_high": observation_high,
-            "observation_processing": "convert to float32 and flatten; no scaling",
-            "number_of_actions": number_of_actions,
-            "max_episode_steps": max_episode_steps,
-            "training_environment_seed": "seed * training_episodes + episode",
-            "training_action_seed": ("10000000 + seed * training_episodes + episode"),
-            "evaluation_environment_seed": (
-                "1000000 + seed * 100000 + checkpoint * 1000 + evaluation_episode"
-            ),
-            "evaluation_action_seed": (
-                "11000000 + seed * 100000 + checkpoint * 1000 + evaluation_episode"
-            ),
-            "recording_environment_seed": (
-                "2000000 + checkpoint" if config.recording_checkpoints else None
-            ),
-            "recording_action_seed": (
-                "12000000 + checkpoint" if config.recording_checkpoints else None
-            ),
-            "recording_frame_stride": (4 if config.recording_checkpoints else None),
-            "evaluation_policy": "frozen stochastic categorical actor",
-            "success_definition": success_definition,
-            "episode_stopping": "termination or truncation",
-            "truncation_target": (
-                "Monte Carlo trajectories end without bootstrap; A2C bootstraps "
-                "the final observation after truncation"
-            ),
-            "paired_initialization": (
-                "same actor initialization for all algorithms within each seed; "
-                "baseline and A2C also share critic initialization"
-            ),
-            "paired_environment_seeds": True,
-            "algorithm_updates": {
-                "reinforce": "one Monte Carlo policy update after each episode",
-                "reinforce_with_baseline": (
-                    "one Monte Carlo actor and critic update after each episode"
-                ),
-                "a2c": ("actor and critic updates after each bounded n-step rollout"),
-            },
-            "learning_rate_schedule": (
-                "independent linear warmup then cosine annealing for actor "
-                "and critic; stepped once per training episode"
-            ),
-            "training_diagnostics_file": (
-                "training_diagnostics.csv" if config.diagnostics else None
-            ),
-            "training_diagnostics_definition": (
-                "one row per completed training episode; A2C losses are "
-                "transition-weighted means across its rollout updates"
-                if config.diagnostics
-                else None
-            ),
-            "variability": "standard deviation across seed evaluation means",
-            "confidence_interval": "mean +/- 1.96 * standard error",
-            "smoothing_window": 1,
-            "versions": {
-                "gymnasium": gym.__version__,
-                "numpy": np.__version__,
-                "torch": torch.__version__,
-            },
-            "torch_threads": torch.get_num_threads(),
-            "torch_interop_threads": torch.get_num_interop_threads(),
-        }
-    )
-    return metadata
-
-
 def run_policy_gradient_experiment(
     config: ExperimentConfig,
-    output: Path,
-) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """Train and evaluate all algorithms with paired reproducible seeds."""
+    output: Path | None,
+) -> tuple[list[dict[str, object]], int | None]:
+    """Train and evaluate the selected algorithm with reproducible seeds."""
     rows: list[dict[str, object]] = []
     diagnostic_rows: list[dict[str, object]] = []
-    metrics_path = output / "metrics.csv"
+    metrics_path = output / "metrics.csv" if output is not None else None
     diagnostics_path = (
-        output / "training_diagnostics.csv" if config.diagnostics else None
+        output / "training_diagnostics.csv"
+        if config.diagnostics and output is not None
+        else None
     )
     if diagnostics_path is not None:
         write_csv(diagnostics_path, DIAGNOSTIC_FIELDS, diagnostic_rows)
-    selected_recording_seeds: dict[str, int] = {}
-
-    for algorithm in config.algorithms:
+    algorithm = config.algorithm
+    print("", flush=True)
+    print("=" * 72, flush=True)
+    print(f"ALGORITHM: {ALGORITHM_LABELS[algorithm]}", flush=True)
+    print("=" * 72, flush=True)
+    recording_states: dict[int, dict[int, dict[str, ModelState]]] = {}
+    final_scores: dict[int, tuple[float, float]] = {}
+    recording_agent: Agent | None = None
+    checkpoints = evaluation_checkpoints(config.preset)
+    for trial_index, seed in enumerate(config.seed_values):
         print("", flush=True)
-        print("=" * 72, flush=True)
-        print(f"ALGORITHM: {ALGORITHM_LABELS[algorithm]}", flush=True)
-        print("=" * 72, flush=True)
-        recording_states: dict[int, dict[int, ModelState]] = {}
-        final_scores: dict[int, tuple[float, float]] = {}
-        recording_agent: Agent | None = None
-        for seed in range(config.seeds):
-            print("", flush=True)
-            print(
-                f"RUN {seed + 1}/{config.seeds} | seed={seed} | fresh network",
-                flush=True,
-            )
-            print("-" * 72, flush=True)
-            training_env = make_environment(config.environment)
-            evaluation_env = make_environment(config.environment)
-            agent = make_agent(
-                algorithm,
-                training_env,
-                actor_learning_rate=config.actor_learning_rate,
-                critic_learning_rate=config.critic_learning_rate,
-                optimizer_name=config.optimizer,
-                weight_decay=config.weight_decay,
-                discount=config.discount,
-                entropy_coefficient=config.entropy_coefficient,
-                hidden_sizes=config.hidden_sizes,
-                seed=seed,
-            )
+        print(
+            f"SEED {trial_index + 1}/{config.seeds} | seed={seed} | fresh network",
+            flush=True,
+        )
+        print("-" * 72, flush=True)
+        training_env = make_environment(config.environment)
+        evaluation_env = make_environment(config.environment)
+        agent = make_agent(
+            algorithm,
+            training_env,
+            actor_learning_rate=config.actor_learning_rate,
+            critic_learning_rate=config.critic_learning_rate,
+            optimizer_name=config.optimizer,
+            weight_decay=config.weight_decay,
+            discount=config.discount,
+            entropy_coefficient=config.entropy_coefficient,
+            hidden_sizes=config.hidden_sizes,
+            seed=seed,
+            ppo_clip_ratio=config.ppo_clip_ratio,
+        )
+        agent_critic_optimizer = critic_optimizer(agent)
+        actor_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        critic_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        if algorithm != "a3c":
             actor_scheduler = make_learning_rate_scheduler(
                 agent.actor_optimizer,
                 training_episodes=config.training_episodes,
@@ -1416,42 +666,177 @@ def run_policy_gradient_experiment(
                 warmup_episodes=config.warmup_episodes,
                 warmup_start_factor=config.warmup_start_factor,
             )
-            agent_critic_optimizer = critic_optimizer(agent)
-            critic_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
-            if agent_critic_optimizer is not None:
-                critic_scheduler = make_learning_rate_scheduler(
-                    agent_critic_optimizer,
-                    training_episodes=config.training_episodes,
-                    minimum_learning_rate=config.critic_minimum_learning_rate,
-                    warmup_episodes=config.warmup_episodes,
-                    warmup_start_factor=config.warmup_start_factor,
+        if agent_critic_optimizer is not None and algorithm != "a3c":
+            critic_scheduler = make_learning_rate_scheduler(
+                agent_critic_optimizer,
+                training_episodes=config.training_episodes,
+                minimum_learning_rate=config.critic_minimum_learning_rate,
+                warmup_episodes=config.warmup_episodes,
+                warmup_start_factor=config.warmup_start_factor,
+            )
+        completed_episodes = 0
+        try:
+            for checkpoint in checkpoints:
+                target_episodes = checkpoint_episode_target(
+                    config.training_episodes,
+                    checkpoint,
                 )
-            completed_episodes = 0
-            try:
-                for checkpoint in EVALUATION_CHECKPOINTS:
-                    target_episodes = checkpoint_episode_target(
-                        config.training_episodes,
-                        checkpoint,
+                starting_episode = completed_episodes
+                if target_episodes > starting_episode:
+                    print(
+                        f"  CHECKPOINT {checkpoint:>3}% | train episodes "
+                        f"{starting_episode + 1}-{target_episodes}",
+                        flush=True,
                     )
-                    starting_episode = completed_episodes
-                    if target_episodes > starting_episode:
-                        print(
-                            f"  CHECKPOINT {checkpoint:>3}% | train episodes "
-                            f"{starting_episode + 1}-{target_episodes}",
-                            flush=True,
+                else:
+                    print(
+                        f"  CHECKPOINT {checkpoint:>3}% | "
+                        + (
+                            "evaluate initial policy before training"
+                            if checkpoint == 0
+                            else "evaluate current policy; no additional training"
+                        ),
+                        flush=True,
+                    )
+                training_results: list[TrainingEpisodeResult] = []
+                diagnostic_segment_start = len(diagnostic_rows)
+                reported_actor_learning_rate = optimizer_learning_rate(
+                    agent.actor_optimizer
+                )
+                reported_critic_learning_rate = (
+                    optimizer_learning_rate(agent_critic_optimizer)
+                    if agent_critic_optimizer is not None
+                    else None
+                )
+                if algorithm == "a3c" and target_episodes > completed_episodes:
+                    assert isinstance(agent, A2C)
+                    assert agent_critic_optimizer is not None
+                    max_episode_steps = (
+                        training_env.spec.max_episode_steps
+                        if training_env.spec is not None
+                        else None
+                    )
+                    a3c_results = train_a3c_episodes(
+                        config.environment,
+                        agent.actor_model,
+                        agent.actor_optimizer,
+                        agent.critic_model,
+                        agent.critic_optimizer,
+                        episode_start=completed_episodes,
+                        episode_count=target_episodes - completed_episodes,
+                        total_episodes=config.training_episodes,
+                        workers=config.a3c_workers,
+                        rollout_steps=config.rollout_steps,
+                        actor_learning_rate=config.actor_learning_rate,
+                        actor_minimum_learning_rate=(
+                            config.actor_minimum_learning_rate
+                        ),
+                        critic_learning_rate=config.critic_learning_rate,
+                        critic_minimum_learning_rate=(
+                            config.critic_minimum_learning_rate
+                        ),
+                        warmup_episodes=config.warmup_episodes,
+                        warmup_start_factor=config.warmup_start_factor,
+                        discount=config.discount,
+                        entropy_coefficient=config.entropy_coefficient,
+                        seed=seed,
+                        collect_diagnostics=config.diagnostics,
+                        max_episode_steps=max_episode_steps,
+                    )
+                    training_results.extend(item.result for item in a3c_results)
+                    if a3c_results:
+                        reported_actor_learning_rate = a3c_results[
+                            -1
+                        ].actor_learning_rate
+                        reported_critic_learning_rate = a3c_results[
+                            -1
+                        ].critic_learning_rate
+                    if diagnostics_path is not None:
+                        for item in a3c_results:
+                            diagnostic_rows.append(
+                                diagnostic_row(
+                                    algorithm,
+                                    seed,
+                                    item.episode_index + 1,
+                                    item.actor_learning_rate,
+                                    item.critic_learning_rate,
+                                    item.result,
+                                )
+                            )
+                    completed_episodes = target_episodes
+                elif algorithm == "ppo" and target_episodes > completed_episodes:
+                    assert isinstance(agent, PPO)
+                    assert agent_critic_optimizer is not None
+                    assert actor_scheduler is not None
+                    while completed_episodes < target_episodes:
+                        batch_episode_count = min(
+                            config.ppo_batch_episodes,
+                            target_episodes - completed_episodes,
                         )
-                    else:
-                        print(
-                            f"  CHECKPOINT {checkpoint:>3}% | "
-                            + (
-                                "evaluate initial policy before training"
-                                if checkpoint == 0
-                                else "evaluate current policy; no additional training"
+                        episode_indices = tuple(
+                            range(
+                                completed_episodes,
+                                completed_episodes + batch_episode_count,
+                            )
+                        )
+                        actor_learning_rate = optimizer_learning_rate(
+                            agent.actor_optimizer
+                        )
+                        critic_learning_rate = optimizer_learning_rate(
+                            agent_critic_optimizer
+                        )
+                        batch = train_ppo_episodes(
+                            training_env,
+                            agent,
+                            environment_seeds=tuple(
+                                seed * config.training_episodes + episode_index
+                                for episode_index in episode_indices
                             ),
-                            flush=True,
+                            action_seeds=tuple(
+                                10_000_000
+                                + seed * config.training_episodes
+                                + episode_index
+                                for episode_index in episode_indices
+                            ),
+                            discount=config.discount,
+                            gae_lambda=config.gae_lambda,
+                            update_epochs=config.ppo_update_epochs,
+                            minibatch_size=config.ppo_minibatch_size,
                         )
-                    training_results: list[TrainingEpisodeResult] = []
-                    diagnostic_segment_start = len(diagnostic_rows)
+                        batch_training_results = ppo_episode_training_results(
+                            batch,
+                            collect_diagnostics=config.diagnostics,
+                        )
+                        training_results.extend(batch_training_results)
+                        if diagnostics_path is not None:
+                            for episode_index, result in zip(
+                                episode_indices,
+                                batch_training_results,
+                                strict=True,
+                            ):
+                                diagnostic_rows.append(
+                                    diagnostic_row(
+                                        algorithm,
+                                        seed,
+                                        episode_index + 1,
+                                        actor_learning_rate,
+                                        critic_learning_rate,
+                                        result,
+                                    )
+                                )
+                        for _ in episode_indices:
+                            actor_scheduler.step()
+                            if critic_scheduler is not None:
+                                critic_scheduler.step()
+                        completed_episodes += batch_episode_count
+
+                    reported_actor_learning_rate = optimizer_learning_rate(
+                        agent.actor_optimizer
+                    )
+                    reported_critic_learning_rate = optimizer_learning_rate(
+                        agent_critic_optimizer
+                    )
+                else:
                     while completed_episodes < target_episodes:
                         episode_index = completed_episodes
                         actor_learning_rate = optimizer_learning_rate(
@@ -1465,7 +850,7 @@ def run_policy_gradient_experiment(
                         result = train_episode(
                             training_env,
                             agent,
-                            rollout_steps=config.a2c_rollout_steps,
+                            rollout_steps=config.rollout_steps,
                             environment_seed=(
                                 seed * config.training_episodes + episode_index
                             ),
@@ -1488,157 +873,210 @@ def run_policy_gradient_experiment(
                                     result,
                                 )
                             )
+                        assert actor_scheduler is not None
                         actor_scheduler.step()
                         if critic_scheduler is not None:
                             critic_scheduler.step()
                         completed_episodes += 1
-
-                    if training_results:
-                        mean_training_return = float(
-                            np.mean([r.episode_return for r in training_results])
-                        )
-                        mean_training_length = float(
-                            np.mean([r.episode_length for r in training_results])
-                        )
-                        mean_updates = float(
-                            np.mean([r.updates for r in training_results])
-                        )
-                        print(
-                            "    TRAIN | "
-                            f"mean return={mean_training_return:.1f} | "
-                            f"mean length={mean_training_length:.1f} | "
-                            f"updates/episode={mean_updates:.2f} | "
-                            "actor lr="
-                            f"{optimizer_learning_rate(agent.actor_optimizer):.3g}"
-                            + (
-                                " | critic lr="
-                                f"{optimizer_learning_rate(agent_critic_optimizer):.3g}"
-                                if agent_critic_optimizer is not None
-                                else ""
-                            ),
-                            flush=True,
-                        )
-                    if diagnostics_path is not None:
-                        diagnostic_segment = diagnostic_rows[diagnostic_segment_start:]
-                        print_diagnostic_summary(diagnostic_segment)
-                        write_csv(
-                            diagnostics_path,
-                            DIAGNOSTIC_FIELDS,
-                            diagnostic_rows,
-                        )
-
-                    checkpoint_results: list[EvaluationResult] = []
-                    for evaluation_episode in range(config.evaluation_episodes):
-                        environment_seed = (
-                            1_000_000
-                            + seed * 100_000
-                            + checkpoint * 1_000
-                            + evaluation_episode
-                        )
-                        action_seed = (
-                            11_000_000
-                            + seed * 100_000
-                            + checkpoint * 1_000
-                            + evaluation_episode
-                        )
-                        result = evaluate_episode(
-                            evaluation_env,
-                            config.environment,
-                            agent,
-                            environment_seed=environment_seed,
-                            action_seed=action_seed,
-                        )
-                        checkpoint_results.append(result)
-                        rows.append(
-                            evaluation_row(
-                                algorithm,
-                                seed,
-                                checkpoint,
-                                evaluation_episode,
-                                result,
-                            )
-                        )
-
-                    mean_return = float(
-                        np.mean(
-                            [result.episode_return for result in checkpoint_results]
-                        )
+                    reported_actor_learning_rate = optimizer_learning_rate(
+                        agent.actor_optimizer
                     )
-                    success_rate = float(
-                        np.mean([result.success for result in checkpoint_results])
+                    reported_critic_learning_rate = (
+                        optimizer_learning_rate(agent_critic_optimizer)
+                        if agent_critic_optimizer is not None
+                        else None
                     )
+
+                if training_results:
+                    mean_training_return = float(
+                        np.mean([r.episode_return for r in training_results])
+                    )
+                    mean_training_length = float(
+                        np.mean([r.episode_length for r in training_results])
+                    )
+                    mean_updates = float(np.mean([r.updates for r in training_results]))
                     print(
-                        f"    EVAL  | mean return={mean_return:.1f} | "
-                        f"success={success_rate:.0%} | "
-                        f"episodes={config.evaluation_episodes}",
+                        "    TRAIN | "
+                        f"mean return={mean_training_return:.1f} | "
+                        f"mean length={mean_training_length:.1f} | "
+                        f"updates/episode={mean_updates:.2f} | "
+                        "actor lr="
+                        f"{reported_actor_learning_rate:.3g}"
+                        + (
+                            f" | critic lr={reported_critic_learning_rate:.3g}"
+                            if reported_critic_learning_rate is not None
+                            else ""
+                        ),
                         flush=True,
                     )
+                if diagnostics_path is not None:
+                    diagnostic_segment = diagnostic_rows[diagnostic_segment_start:]
+                    print_diagnostic_summary(diagnostic_segment)
+                    write_csv(
+                        diagnostics_path,
+                        DIAGNOSTIC_FIELDS,
+                        diagnostic_rows,
+                    )
+
+                checkpoint_results: list[EvaluationResult] = []
+                for evaluation_episode in range(config.evaluation_episodes):
+                    environment_seed = (
+                        1_000_000
+                        + seed * 100_000
+                        + checkpoint * 1_000
+                        + evaluation_episode
+                    )
+                    action_seed = (
+                        11_000_000
+                        + seed * 100_000
+                        + checkpoint * 1_000
+                        + evaluation_episode
+                    )
+                    result = evaluate_episode(
+                        evaluation_env,
+                        config.environment,
+                        agent,
+                        environment_seed=environment_seed,
+                        action_seed=action_seed,
+                    )
+                    checkpoint_results.append(result)
+                    rows.append(
+                        evaluation_row(
+                            algorithm,
+                            seed,
+                            checkpoint,
+                            evaluation_episode,
+                            result,
+                        )
+                    )
+
+                mean_return = float(
+                    np.mean([result.episode_return for result in checkpoint_results])
+                )
+                success_rate = float(
+                    np.mean([result.success for result in checkpoint_results])
+                )
+                print(
+                    f"    EVAL  | mean return={mean_return:.1f} | "
+                    f"success={success_rate:.0%} | "
+                    f"episodes={config.evaluation_episodes}",
+                    flush=True,
+                )
+                if metrics_path is not None:
                     write_csv(metrics_path, CSV_FIELDS, rows)
 
-                    if checkpoint in config.recording_checkpoints:
-                        recording_states.setdefault(seed, {})[checkpoint] = {
+                if checkpoint in config.recording_checkpoints or (
+                    output is not None
+                    and config.preset == "standard"
+                    and checkpoint == 100
+                ):
+                    snapshot = {
+                        "actor": {
                             name: value.detach().clone()
-                            for name, value in agent.actor_model.state_dict().items()
+                            for name, value in (agent.actor_model.state_dict().items())
                         }
-                    if checkpoint == 100:
-                        final_scores[seed] = (mean_return, success_rate)
-            finally:
-                training_env.close()
-                evaluation_env.close()
-            recording_agent = agent
+                    }
+                    agent_critic_model = getattr(agent, "critic_model", None)
+                    if agent_critic_model is not None:
+                        snapshot["critic"] = {
+                            name: value.detach().clone()
+                            for name, value in (agent_critic_model.state_dict().items())
+                        }
+                    recording_states.setdefault(seed, {})[checkpoint] = snapshot
+                if checkpoint == 100:
+                    final_scores[seed] = (mean_return, success_rate)
+        finally:
+            training_env.close()
+            evaluation_env.close()
+        recording_agent = agent
 
-        if config.recording_checkpoints:
-            selected_seed = max(final_scores, key=final_scores.__getitem__)
-            selected_recording_seeds[algorithm] = selected_seed
-            assert recording_agent is not None
-            print(
-                f"  RECORDINGS | selected seed={selected_seed} from final evaluation",
-                flush=True,
+    if config.recording_checkpoints:
+        selected_seed = max(final_scores, key=final_scores.__getitem__)
+        assert recording_agent is not None
+        assert output is not None
+        selected_snapshot = recording_states[selected_seed][100]
+        if config.preset == "standard":
+            torch.save(
+                {
+                    "algorithm": algorithm,
+                    "seed": selected_seed,
+                    "checkpoint": 100,
+                    "actor_state_dict": selected_snapshot["actor"],
+                    "critic_state_dict": selected_snapshot.get("critic"),
+                },
+                output / "best_model.pt",
             )
-            for checkpoint in config.recording_checkpoints:
-                recording_agent.actor_model.load_state_dict(
-                    recording_states[selected_seed][checkpoint]
-                )
-                record_evaluation(
-                    output
-                    / "recordings"
-                    / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
-                    config.environment,
-                    recording_agent,
-                    environment_seed=2_000_000 + checkpoint,
-                    action_seed=12_000_000 + checkpoint,
-                    frame_stride=4,
-                )
-                print(f"    recorded checkpoint {checkpoint}%", flush=True)
-    return rows, selected_recording_seeds
+        print(
+            f"  RECORDINGS | selected seed={selected_seed} from final evaluation",
+            flush=True,
+        )
+        for checkpoint in config.recording_checkpoints:
+            recording_agent.actor_model.load_state_dict(
+                recording_states[selected_seed][checkpoint]["actor"]
+            )
+            record_evaluation(
+                output / "recordings" / f"{algorithm}_checkpoint_{checkpoint:03d}.gif",
+                config.environment,
+                recording_agent,
+                environment_seed=2_000_000 + checkpoint,
+                action_seed=12_000_000 + checkpoint,
+                frame_stride=recording_frame_stride(config.environment),
+            )
+            print(f"    recorded checkpoint {checkpoint}%", flush=True)
+        return rows, selected_seed
+    return rows, None
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     config = parse_config(argv)
-    output = create_run_directory("policy_gradient", config.environment)
-    (output / "figures").mkdir()
-    if config.recording_checkpoints:
-        (output / "recordings").mkdir()
+    output = (
+        None
+        if config.preset == "quick"
+        else create_run_directory(
+            "policy_gradient",
+            config.environment,
+            config.preset,
+        )
+    )
+    if output is not None:
+        (output / "figures").mkdir()
+        if config.recording_checkpoints:
+            (output / "recordings").mkdir()
 
     metadata = initial_metadata(config)
-    write_metadata(output / "metadata.json", metadata)
-    write_csv(output / "metrics.csv", CSV_FIELDS, [])
+    if output is not None:
+        write_metadata(output / "metadata.json", metadata)
+        write_csv(output / "metrics.csv", CSV_FIELDS, [])
     print_experiment_header(config)
     try:
-        rows, selected_recording_seeds = run_policy_gradient_experiment(config, output)
+        rows, selected_seed = run_policy_gradient_experiment(config, output)
+        if output is None:
+            print_final_evaluation(rows, (config.algorithm,))
+            print(
+                "Quick compatibility run complete; no artifacts were written.",
+                flush=True,
+            )
+            return
         metadata["recording_seed_selection"] = (
             "highest final mean evaluation return; success rate breaks ties"
+            if selected_seed is not None
+            else None
         )
-        metadata["recording_seed_by_algorithm"] = selected_recording_seeds
-        write_outputs(output, config, rows, metadata)
+        metadata["selected_seed"] = selected_seed
+        metadata["model_file"] = (
+            "best_model.pt" if config.preset == "standard" else None
+        )
+        metadata["model_seed"] = selected_seed if config.preset == "standard" else None
+        write_report(output, config, rows, metadata)
     except Exception:
-        metadata["status"] = "failed"
-        write_metadata(output / "metadata.json", metadata)
+        if output is not None:
+            metadata["status"] = "failed"
+            write_metadata(output / "metadata.json", metadata)
         raise
 
     metadata["status"] = "complete"
     write_metadata(output / "metadata.json", metadata)
-    print_final_evaluation(rows, config.algorithms)
+    print_final_evaluation(rows, (config.algorithm,))
     print("EXPERIMENT COMPLETE", flush=True)
     print(f"  Output  : {output}", flush=True)
     print(f"  Summary : {output / 'summary.html'}", flush=True)

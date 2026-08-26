@@ -5,6 +5,22 @@ TEST ?=
 PYTEST_ARGS ?=
 MODULE ?=
 ARGS ?=
+PRESET ?=
+ENV ?=
+ALGORITHM ?=
+SEEDS ?=
+SEED_BASE ?=
+TRAIN ?=
+EVAL ?=
+
+COMMON_EXPERIMENT_ARGS = \
+	$(if $(PRESET),--preset $(PRESET)) \
+	$(if $(ENV),--environment $(ENV)) \
+	$(if $(ALGORITHM),--algorithm $(ALGORITHM)) \
+	$(if $(SEEDS),--seeds $(SEEDS)) \
+	$(if $(SEED_BASE),--seed-base $(SEED_BASE)) \
+	$(if $(TRAIN),--training-episodes $(TRAIN)) \
+	$(if $(EVAL),--evaluation-episodes $(EVAL))
 
 .DEFAULT_GOAL := help
 
@@ -13,42 +29,17 @@ ARGS ?=
 help: ## Show the available commands.
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
-	@echo 'Experiment arguments (pass as ARGS="..."):'
-	@echo '  ba  --runs N --steps N --smoothing-window N --seed N'
-	@echo '  mc  --environment ID --preset {quick,standard}'
-	@echo '      --prediction-episodes N --training-episodes N'
-	@echo '      --evaluation-episodes N --epsilon FLOAT --seeds N'
-	@echo '  td  --environment {CliffWalking-v1,FrozenLake-v1}'
-	@echo '      --preset {quick,standard} --prediction-episodes N'
-	@echo '      --training-episodes N --evaluation-episodes N --seeds N'
-	@echo '      --learning-rate FLOAT --discount FLOAT --epsilon FLOAT'
-	@echo '      --rollout/--n-steps N'
-	@echo '      --map-size N --safe-probability FLOAT --non-slippery'
-	@echo '      --max-episode-steps N'
-	@echo '  fa  -e/--env/--environment {Acrobot-v1,MountainCar-v0}'
-	@echo '      -p/--preset {quick,tuning,standard}'
-	@echo '      -o/--opt/--optimizer {sgd,adam}'
-	@echo '      --train/--training-episodes N --eval/--evaluation-episodes N'
-	@echo '      -n/--seeds N --lr/--learning-rate FLOAT --lr-min FLOAT'
-	@echo '      --val/--validation-episodes N'
-	@echo '      --gamma/--discount FLOAT --eps/--epsilon FLOAT'
-	@echo '      --rollout/--n-steps N'
-	@echo '      --sarsa-eps-final/--sarsa-final-epsilon FLOAT'
-	@echo '      --hidden/--hidden-sizes N [N ...]'
-	@echo '      -r/--record/--recordings {none,final,checkpoints}'
-	@echo '      --diag/--diagnostics'
-	@echo '  pg  -e/--env/--environment {CartPole-v1,Acrobot-v1}'
-	@echo '      -p/--preset {quick,tuning,standard}'
-	@echo '      --algorithm/--algorithms {reinforce,reinforce_with_baseline,a2c} [...]'
-	@echo '      --train/--training-episodes N --eval/--evaluation-episodes N'
-	@echo '      -n/--seeds N --lr/--actor-lr FLOAT --lr-min FLOAT'
-	@echo '      --critic-lr FLOAT --critic-lr-min FLOAT --wd/--weight-decay FLOAT'
-	@echo '      -o/--opt/--optimizer {sgd,adam,adamw} --gamma/--discount FLOAT'
-	@echo '      --warmup/--warmup-episodes N --warmup-start FLOAT'
-	@echo '      --rollout/--a2c-rollout-steps N --entropy FLOAT'
-	@echo '      --hidden/--hidden-sizes N [N ...]'
-	@echo '      -r/--record/--recordings {none,final,checkpoints}'
-	@echo '      --diag/--diagnostics'
+	@echo 'Shared non-bandit variables:'
+	@echo '  PRESET={quick,tuning,standard}  ENV=ID  ALGORITHM=NAME'
+	@echo '  SEEDS=N  SEED_BASE=N  TRAIN=N  EVAL=N'
+	@echo '  ARGS="..." passes family-specific options through unchanged.'
+	@echo
+	@echo 'Examples:'
+	@echo '  make pg PRESET=standard ENV=CartPole-v1 ALGORITHM=a2c'
+	@echo '  make fa PRESET=tuning ENV=Acrobot-v1 ALGORITHM=q_learning ARGS="--lr 0.001"'
+	@echo '  make td PRESET=quick ENV=FrozenLake-v1 ALGORITHM=sarsa'
+	@echo '  make fa PRESET=quick ENV=Taxi-v4 ALGORITHM=q_learning'
+	@echo 'Use make <family> ARGS="--help" for authoritative runner options.'
 
 setup: ## Install library, experiment, and development dependencies.
 	$(PYTHON) -m pip install -e ".[experiments,dev]"
@@ -78,13 +69,13 @@ ba: ## Run the bandit experiment with optional ARGS="...".
 	$(PYTHON) -m experiments.bandits.run $(ARGS)
 
 mc: ## Run the Monte Carlo experiment with optional ARGS="...".
-	$(PYTHON) -m experiments.monte_carlo.run $(ARGS)
+	$(PYTHON) -m experiments.monte_carlo.run $(COMMON_EXPERIMENT_ARGS) $(ARGS)
 
 td: ## Run the temporal-difference experiment with optional ARGS="...".
-	$(PYTHON) -m experiments.temporal_difference.run $(ARGS)
+	$(PYTHON) -m experiments.temporal_difference.run $(COMMON_EXPERIMENT_ARGS) $(ARGS)
 
 fa: ## Run the function-approximation experiment with optional ARGS="...".
-	$(PYTHON) -m experiments.function_approximation.run $(ARGS)
+	$(PYTHON) -m experiments.function_approximation.run $(COMMON_EXPERIMENT_ARGS) $(ARGS)
 
 pg: ## Run the policy-gradient experiment with optional ARGS="...".
-	$(PYTHON) -m experiments.policy_gradient.run $(ARGS)
+	$(PYTHON) -m experiments.policy_gradient.run $(COMMON_EXPERIMENT_ARGS) $(ARGS)

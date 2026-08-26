@@ -6,8 +6,8 @@
 | 2 | First/every visit Monte Carlo prediction and control | `Blackjack-v1` / `Taxi-v4` | Implemented |
 | 3 | One-step and bounded-rollout TD prediction, SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Implemented |
 | 4 | Semi-gradient one-step and bounded-rollout TD, SARSA, and Q-learning | `Acrobot-v1` / `MountainCar-v0` | Implemented; Acrobot standard validation complete |
-| 5 | REINFORCE with baseline and A2C | `CartPole-v1` / `Acrobot-v1` | Implemented; A2C standard validation pending |
-| 6 | A3C, PPO, TRPO | `CartPole-v1` / `Pendulum-v1` | Planned |
+| 5 | REINFORCE with baseline, A2C, and A3C | `CartPole-v1` / `Acrobot-v1` | Implemented; A3C standard validation pending |
+| 6 | PPO and TRPO | `CartPole-v1` / `Pendulum-v1` | Discrete PPO implemented; continuous PPO and TRPO planned |
 
 For each family: implement the variants, add minimal equation-level tests, run
 one multi-seed Gymnasium experiment, and generate a deterministic visual

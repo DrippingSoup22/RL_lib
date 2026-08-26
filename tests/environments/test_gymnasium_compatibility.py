@@ -1,3 +1,5 @@
+import math
+
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -5,6 +7,9 @@ import torch
 from gymnasium.utils.env_checker import check_env
 
 from experiments.bandits.environments import GaussianBandit
+from experiments.function_approximation.environments import (
+    make_environment as make_function_approximation_environment,
+)
 from experiments.monte_carlo.run import (
     BLACKJACK_ACTIONS,
     BLACKJACK_STATES,
@@ -21,12 +26,14 @@ from experiments.policy_gradient.run import (
     make_agent,
     make_environment,
 )
+from experiments.policy_gradient.runners.ppo import train_episodes as train_ppo_episodes
+from experiments.temporal_difference.environments import environment_configuration
 from rl_lib.algorithms.function_approximation import (
     SemiGradientQLearning,
     SemiGradientSARSA,
 )
 from rl_lib.algorithms.monte_carlo import FirstVisitMonteCarloControl
-from rl_lib.algorithms.policy_gradient import A2C, ReinforceWithBaseline
+from rl_lib.algorithms.policy_gradient import A2C, PPO, ReinforceWithBaseline
 from rl_lib.data import EpisodeStep
 from rl_lib.models import ActionValueNetwork
 
@@ -81,6 +88,52 @@ def test_monte_carlo_control_interacts_with_taxi() -> None:
     env.close()
 
 
+@pytest.mark.parametrize(
+    ("environment", "states", "actions"),
+    (
+        ("Blackjack-v1", 704, 2),
+        ("CliffWalking-v1", 48, 4),
+        ("FrozenLake-v1", 16, 4),
+        ("Taxi-v4", 500, 6),
+    ),
+)
+def test_monte_carlo_accepts_every_toy_text_space(
+    environment: str,
+    states: int,
+    actions: int,
+) -> None:
+    inspected_states, inspected_actions, encoder, _ = inspect_environment(environment)
+    env = gym.make(environment)
+    observation, _ = env.reset(seed=0)
+
+    assert (inspected_states, inspected_actions) == (states, actions)
+    assert 0 <= encoder(observation) < states
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "environment", ("Blackjack-v1", "CliffWalking-v1", "FrozenLake-v1", "Taxi-v4")
+)
+def test_temporal_difference_accepts_every_toy_text_space(environment: str) -> None:
+    configurations, states, actions, max_steps, encoder = environment_configuration(
+        environment,
+        (0,),
+        map_size=4,
+        safe_probability=0.8,
+        slippery=True,
+        max_episode_steps=None,
+    )
+    env = gym.make(environment)
+    observation, _ = env.reset(seed=0)
+
+    assert configurations
+    assert states > 0
+    assert actions > 0
+    assert max_steps > 0
+    assert 0 <= encoder(observation) < states
+    env.close()
+
+
 def test_temporal_difference_environments_have_discrete_gymnasium_api() -> None:
     for environment in ("CliffWalking-v1", "FrozenLake-v1"):
         env = gym.make(environment, max_episode_steps=10)
@@ -98,19 +151,28 @@ def test_temporal_difference_environments_have_discrete_gymnasium_api() -> None:
         env.close()
 
 
-@pytest.mark.parametrize("environment", ("MountainCar-v0", "Acrobot-v1"))
+@pytest.mark.parametrize(
+    ("environment", "shape", "actions"),
+    (
+        ("MountainCar-v0", (2,), 3),
+        ("Acrobot-v1", (6,), 3),
+        ("CartPole-v1", (4,), 2),
+    ),
+)
 def test_function_approximation_environments_have_compatible_spaces(
     environment: str,
+    shape: tuple[int, ...],
+    actions: int,
 ) -> None:
-    env = gym.make(environment)
+    from experiments.function_approximation.environments import make_environment
+
+    env = make_environment(environment)
 
     assert isinstance(env.observation_space, gym.spaces.Box)
-    assert env.observation_space.shape in ((2,), (6,))
-    assert np.all(np.isfinite(env.observation_space.low))
-    assert np.all(np.isfinite(env.observation_space.high))
+    assert env.observation_space.shape == shape
     assert isinstance(env.action_space, gym.spaces.Discrete)
     assert env.action_space.start == 0
-    assert env.action_space.n == 3
+    assert env.action_space.n == actions
 
     observation, _ = env.reset(seed=0)
     next_observation, _, terminated, truncated, _ = env.step(0)
@@ -118,6 +180,71 @@ def test_function_approximation_environments_have_compatible_spaces(
     assert env.observation_space.contains(next_observation)
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    ("Acrobot-v1", "CartPole-v1", "MountainCar-v0"),
+)
+def test_policy_gradient_accepts_discrete_classic_control_environments(
+    environment: str,
+) -> None:
+    env = make_environment(environment, max_episode_steps=1)
+    observation, _ = env.reset(seed=0)
+    transition = env.step(env.action_space.sample())
+
+    assert env.observation_space.contains(observation)
+    assert len(transition) == 5
+    env.close()
+
+
+@pytest.mark.parametrize(
+    ("environment", "shape", "active"),
+    (
+        ("Blackjack-v1", (45,), 3),
+        ("CliffWalking-v1", (48,), 1),
+        ("FrozenLake-v1", (16,), 1),
+        ("Taxi-v4", (500,), 1),
+    ),
+)
+@pytest.mark.parametrize(
+    "factory", (make_function_approximation_environment, make_environment)
+)
+def test_neural_families_one_hot_encode_every_toy_text_space(
+    factory,
+    environment: str,
+    shape: tuple[int, ...],
+    active: int,
+) -> None:
+    env = factory(environment)
+    observation, _ = env.reset(seed=0)
+
+    assert isinstance(env.observation_space, gym.spaces.Box)
+    assert observation.shape == shape
+    assert set(np.unique(observation)).issubset({0, 1})
+    assert int(np.sum(observation)) == active
+    if environment == "CliffWalking-v1":
+        assert env.spec is not None
+        assert env.spec.max_episode_steps == 200
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    ("MountainCarContinuous-v0", "Pendulum-v1"),
+)
+def test_continuous_action_classic_control_environments_obey_gymnasium_api(
+    environment: str,
+) -> None:
+    env = gym.make(environment, max_episode_steps=1)
+    observation, _ = env.reset(seed=0)
+    transition = env.step(env.action_space.sample())
+
+    assert isinstance(env.observation_space, gym.spaces.Box)
+    assert isinstance(env.action_space, gym.spaces.Box)
+    assert env.observation_space.contains(observation)
+    assert len(transition) == 5
     env.close()
 
 
@@ -202,4 +329,60 @@ def test_policy_gradient_agents_interact_with_gymnasium(algorithm: str) -> None:
             torch.isfinite(parameter).all()
             for parameter in agent.critic_model.parameters()
         )
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        "Acrobot-v1",
+        "Blackjack-v1",
+        "CartPole-v1",
+        "CliffWalking-v1",
+        "FrozenLake-v1",
+        "MountainCar-v0",
+        "Taxi-v4",
+    ),
+)
+def test_ppo_interacts_with_every_discrete_policy_gradient_environment(
+    environment: str,
+) -> None:
+    env = make_environment(environment, max_episode_steps=1)
+    agent = make_agent(
+        "ppo",
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.001,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.0,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    assert isinstance(agent, PPO)
+
+    result = train_ppo_episodes(
+        env,
+        agent,
+        environment_seeds=(0,),
+        action_seeds=(0,),
+        discount=0.99,
+        gae_lambda=0.95,
+        update_epochs=1,
+        minibatch_size=4,
+    )
+
+    assert len(result.episodes) == 1
+    assert result.episodes[0].episode_length == 1
+    assert result.episodes[0].terminated or result.episodes[0].truncated
+    assert len(result.minibatch_updates) == 1
+    assert all(
+        math.isfinite(value)
+        for value in (
+            result.minibatch_updates[0].actor_loss,
+            result.minibatch_updates[0].critic_loss,
+            result.minibatch_updates[0].entropy,
+        )
+    )
     env.close()

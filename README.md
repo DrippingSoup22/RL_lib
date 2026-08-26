@@ -14,7 +14,7 @@ first principles and validates them with Gymnasium experiments.
 | Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
 
 Bandits, Monte Carlo, tabular temporal-difference, function approximation, the
-two REINFORCE variants, and A2C are implemented currently. See
+two REINFORCE variants, A2C, A3C, and discrete-action PPO are implemented. See
 [`docs/roadmap.md`](docs/roadmap.md) for the planned order.
 
 ## Structure
@@ -44,31 +44,31 @@ Run the implemented experiments with:
 
 ```bash
 make ba
-make mc
-make mc ARGS="--environment Taxi-v4"
-make td
-make td ARGS="--environment FrozenLake-v1"
-make td ARGS="--preset quick --rollout 5"
-make fa ARGS="-p quick"
-make fa ARGS="-e MountainCar-v0 -p quick"
-make fa ARGS="-p tuning --lr 0.001 --eps 0.1"
-make fa ARGS="-p quick --rollout 5"
-make pg ARGS="-p quick"
-make pg ARGS="-e Acrobot-v1 -p tuning"
+make mc PRESET=quick ENV=Blackjack-v1 ALGORITHM=first_visit_control
+make td PRESET=quick ENV=FrozenLake-v1 ALGORITHM=sarsa
+make fa PRESET=quick ENV=Taxi-v4 ALGORITHM=q_learning
+make fa PRESET=tuning ENV=Acrobot-v1 ALGORITHM=q_learning \
+  ARGS="--lr 0.001 --eps 0.1"
+make pg PRESET=standard ENV=CartPole-v1 ALGORITHM=a2c
+make pg PRESET=quick ENV=CartPole-v1 ALGORITHM=ppo
 ```
 
 Run `make help` to see every experiment shortcut and accepted argument.
 
-Monte Carlo runs use environment-specific `standard` budgets. Add
-`--preset quick` for a short compatibility run; explicit episode counts still
-override the selected preset.
+Every non-bandit invocation runs one explicitly selected algorithm or variant.
+`quick` is an artifact-free compatibility check, `tuning` writes a compact
+configuration report, and `standard` performs the final multi-seed evaluation.
+Explicit episode counts still override the selected preset.
 
-Each run writes unsmoothed measurements to `metrics.csv`, complete configuration
-to `metadata.json`, an automatically generated `summary.html`, and selected
-evaluation recordings. Gymnasium outputs live under
-`runs/<family>/<environment>/<timestamp>/`; the multi-condition bandit runner
-uses `runs/bandits/<timestamp>/`. Standard runs record behavior at 25%, 50%,
-75%, and 100%; quick runs record only 100%.
-For non-bandit experiments, those recordings come from the seed with the best
-final frozen evaluation. Summaries report every seed separately as well as the
-across-seed aggregate.
+Blackjack, CliffWalking, FrozenLake, and Taxi are accepted by every non-bandit
+family. Compatibility is based on observation/action spaces rather than a
+difficulty allowlist, so intentionally weak algorithm/environment combinations
+remain available for educational experiments.
+
+Quick runs write nothing. Tuning and standard Gymnasium outputs live under
+`runs/<family>/<environment>/<timestamp>/`; missing parents are created
+automatically. Tuning writes raw measurements, metadata, and a compact HTML.
+Standard additionally records the best seed at 25%, 50%, 75%, and 100%, saves
+that selected policy as `best_model.pt` or `best_model.npz`, and produces the
+complete multi-seed report. The multi-condition bandit runner keeps its existing
+`runs/bandits/<timestamp>/` layout.

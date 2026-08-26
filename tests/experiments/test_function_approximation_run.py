@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import torch
 
+from experiments.function_approximation.configuration import parse_config
 from experiments.function_approximation.run import (
     EvaluationResult,
     algorithm_final_epsilon,
@@ -81,6 +82,32 @@ def test_model_snapshot_is_independent_and_restorable() -> None:
 
     torch.testing.assert_close(model.weight, torch.tensor([[2.0]]))
     torch.testing.assert_close(model.bias, torch.tensor([3.0]))
+
+
+def test_observation_scaling_metadata_matches_the_environment_wrapper() -> None:
+    mountain_car = parse_config(
+        (
+            "--preset",
+            "quick",
+            "--algorithm",
+            "q_learning",
+            "--environment",
+            "MountainCar-v0",
+        )
+    )
+    cart_pole = parse_config(
+        (
+            "--preset",
+            "quick",
+            "--algorithm",
+            "q_learning",
+            "--environment",
+            "CartPole-v1",
+        )
+    )
+
+    assert mountain_car.observations_rescaled
+    assert not cart_pole.observations_rescaled
 
 
 @pytest.mark.parametrize("algorithm", ("sarsa", "q_learning"))
