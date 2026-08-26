@@ -554,7 +554,12 @@ def main() -> None:
     output = (
         None
         if args.preset == "quick"
-        else create_run_directory("monte_carlo", args.environment, args.preset)
+        else create_run_directory(
+            "monte_carlo",
+            args.environment,
+            args.algorithm,
+            args.preset,
+        )
     )
     is_prediction = args.algorithm.endswith("_prediction")
     recording_checkpoints = (

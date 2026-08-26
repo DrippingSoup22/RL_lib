@@ -55,7 +55,7 @@ def test_invalid_seed_ranges_are_rejected(count: int, base: int) -> None:
         resolve_seed_values(count, "standard", base)
 
 
-def test_persisted_run_directory_uses_family_and_environment(
+def test_persisted_run_directory_uses_environment_family_and_algorithm(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -64,18 +64,61 @@ def test_persisted_run_directory_uses_family_and_environment(
     output = create_run_directory(
         "policy_gradient",
         "personal.envs:Author/Control-v0",
+        "reinforce_with_baseline",
         "standard",
     )
 
     assert output.resolve().parent == (
-        tmp_path / "runs" / "policy_gradient" / "personal.envs__Author__Control-v0"
+        tmp_path
+        / "runs"
+        / "personal.envs__Author__Control-v0"
+        / "policy_gradient"
+        / "reinforce_with_baseline"
     )
     assert output.is_dir()
+    assert tuple(output.parent.parent.iterdir()) == (output.parent,)
+
+
+def test_bandit_run_directory_keeps_the_synthetic_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    output = create_run_directory("bandits")
+
+    assert output.resolve().parent == tmp_path / "runs" / "bandits"
+    assert output.is_dir()
+
+
+def test_persisted_run_directory_reuses_parents_for_another_algorithm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    ppo_output = create_run_directory(
+        "policy_gradient",
+        "CartPole-v1",
+        "ppo",
+        "tuning",
+    )
+    a3c_output = create_run_directory(
+        "policy_gradient",
+        "CartPole-v1",
+        "a3c",
+        "standard",
+    )
+
+    family_directory = tmp_path / "runs" / "CartPole-v1" / "policy_gradient"
+    assert ppo_output.resolve().parent == family_directory / "ppo"
+    assert a3c_output.resolve().parent == family_directory / "a3c"
+    assert {path.name for path in family_directory.iterdir()} == {"a3c", "ppo"}
 
 
 def test_quick_runs_cannot_create_a_persisted_directory() -> None:
     with pytest.raises(ValueError, match="only tuning and standard"):
-        create_run_directory("policy_gradient", "CartPole-v1", "quick")
+        create_run_directory("policy_gradient", "CartPole-v1", "ppo", "quick")
 
 
 def test_quick_mode_evaluates_only_before_and_after_training() -> None:

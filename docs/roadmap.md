@@ -6,8 +6,8 @@
 | 2 | First/every visit Monte Carlo prediction and control | `Blackjack-v1` / `Taxi-v4` | Implemented |
 | 3 | One-step and bounded-rollout TD prediction, SARSA, Q-learning | `CliffWalking-v1` / configurable `FrozenLake-v1` | Implemented |
 | 4 | Semi-gradient one-step and bounded-rollout TD, SARSA, and Q-learning | `Acrobot-v1` / `MountainCar-v0` | Implemented; Acrobot standard validation complete |
-| 5 | REINFORCE with baseline, A2C, and A3C | `CartPole-v1` / `Acrobot-v1` | Implemented; A3C standard validation pending |
-| 6 | PPO and TRPO | `CartPole-v1` / `Pendulum-v1` | Discrete PPO implemented; continuous PPO and TRPO planned |
+| 5 | REINFORCE with baseline, A2C, and A3C | `CartPole-v1` / `Acrobot-v1` | Implemented; A3C standard validation complete |
+| 6 | PPO and TRPO | `CartPole-v1` / `Pendulum-v1` | Discrete PPO implemented and standard validation complete; continuous PPO and TRPO planned |
 
 For each family: implement the variants, add minimal equation-level tests, run
 one multi-seed Gymnasium experiment, and generate a deterministic visual
@@ -17,6 +17,14 @@ infrastructure more simply.
 Acrobot provides the end-to-end validation for function approximation.
 MountainCar remains a challenge for the current MLP and epsilon-greedy
 exploration setup rather than blocking completion of the family.
+The untuned A3C CartPole standard run solved the environment for one of three
+seeds. The other two seeds did not solve it, so the run validates the
+implementation and experiment workflow while showing that the default settings
+are seed-sensitive rather than robustly tuned.
+The discrete PPO CartPole standard run solved the environment for all three
+paired seeds. Two seeds reached 100% success by the 25% checkpoint and the third
+reached it by 50%, using the configuration carried forward from the earlier
+one-seed tuning run.
 Standard experiments record frozen evaluation behavior at 25%, 50%, 75%, and
 100% and offer only difficulty controls that illuminate the comparison.
 

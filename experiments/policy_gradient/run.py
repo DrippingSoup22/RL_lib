@@ -1035,6 +1035,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         else create_run_directory(
             "policy_gradient",
             config.environment,
+            config.algorithm,
             config.preset,
         )
     )

@@ -704,6 +704,7 @@ def main() -> None:
         else create_run_directory(
             "function_approximation",
             config.environment,
+            config.algorithm,
             config.preset,
         )
     )

@@ -32,9 +32,10 @@ Do not implement algorithms outside the user's current request.
   `metadata.json`, an automatic `summary.html`, and only the selected behavior
   recordings.
 - Store Gymnasium runs under
-  `runs/<family>/<environment>/<timestamp>/`. Synthetic experiments that cover
-  several conditions in one run, such as bandits, may omit the environment
-  directory.
+  `runs/<environment>/<family>/<algorithm>/<timestamp>/`. Create only the exact
+  branch required by an experiment and reuse any existing parent directories.
+  Synthetic experiments that cover several conditions in one run, such as
+  bandits, may omit the environment and algorithm directories.
 - Print the output directory before work begins. For long runs, write metadata
   before training, report algorithm/seed/checkpoint progress, and rewrite
   `metrics.csv` after each completed checkpoint so interruption preserves

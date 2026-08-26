@@ -86,18 +86,31 @@ def environment_directory_name(environment: str) -> str:
 def create_run_directory(
     family: str,
     environment: str | None = None,
+    algorithm: str | None = None,
     mode: str | None = None,
 ) -> Path:
     """Create a timestamped persisted-run directory and report it immediately."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    if family == "bandits" and environment is None and mode is None:
+    if (
+        family == "bandits"
+        and environment is None
+        and algorithm is None
+        and mode is None
+    ):
         output = Path("runs") / family
     else:
         if environment is None:
             raise ValueError("persisted Gymnasium runs require an environment")
+        if algorithm is None:
+            raise ValueError("persisted Gymnasium runs require an algorithm")
         if mode not in ("tuning", "standard"):
             raise ValueError("only tuning and standard experiments persist runs")
-        output = Path("runs") / family / environment_directory_name(environment)
+        output = (
+            Path("runs")
+            / environment_directory_name(environment)
+            / family
+            / environment_directory_name(algorithm)
+        )
     output /= run_id
     output.mkdir(parents=True, exist_ok=False)
     print(f"Output: {output}", flush=True)

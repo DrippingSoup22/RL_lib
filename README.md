@@ -66,9 +66,10 @@ difficulty allowlist, so intentionally weak algorithm/environment combinations
 remain available for educational experiments.
 
 Quick runs write nothing. Tuning and standard Gymnasium outputs live under
-`runs/<family>/<environment>/<timestamp>/`; missing parents are created
-automatically. Tuning writes raw measurements, metadata, and a compact HTML.
-Standard additionally records the best seed at 25%, 50%, 75%, and 100%, saves
-that selected policy as `best_model.pt` or `best_model.npz`, and produces the
-complete multi-seed report. The multi-condition bandit runner keeps its existing
+`runs/<environment>/<family>/<algorithm>/<timestamp>/`. Only the branch needed
+by the selected experiment is created; existing parent directories are reused.
+Tuning writes raw measurements, metadata, and a compact HTML. Standard
+additionally records the best seed at 25%, 50%, 75%, and 100%, saves that
+selected policy as `best_model.pt` or `best_model.npz`, and produces the complete
+multi-seed report. The multi-condition bandit runner keeps its existing
 `runs/bandits/<timestamp>/` layout.

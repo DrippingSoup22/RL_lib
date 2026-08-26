@@ -54,15 +54,15 @@ are `td_prediction`, `sarsa`, and `q_learning`. Function approximation provides
 Persisted Gymnasium runs use:
 
 ```text
-runs/<family>/<environment>/<timestamp>/
+runs/<environment>/<family>/<algorithm>/<timestamp>/
 ```
 
-All missing parent directories are created automatically. Deleting any portion
-of `runs/` therefore does not affect later experiments. The experiment mode is
-stored in `metadata.json`. Custom Gymnasium IDs are converted to a safe directory
-component while their exact value remains in metadata. Bandits keep
-`runs/bandits/<timestamp>/` because one invocation covers multiple synthetic
-conditions.
+Only the exact branch required by an experiment is created, and existing parent
+directories are reused. Deleting any portion of `runs/` therefore does not
+affect later experiments. The experiment mode is stored in `metadata.json`.
+Custom Gymnasium IDs are converted to a safe directory component while their
+exact value remains in metadata. Bandits keep `runs/bandits/<timestamp>/`
+because one invocation covers multiple synthetic conditions.
 
 Raw `metrics.csv` values remain unsmoothed. Complete reproducibility settings
 live in `metadata.json`; summaries display only the settings needed to read the

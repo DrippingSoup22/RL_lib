@@ -453,6 +453,7 @@ def main() -> None:
         else create_run_directory(
             "temporal_difference",
             args.environment,
+            args.algorithm,
             args.preset,
         )
     )
