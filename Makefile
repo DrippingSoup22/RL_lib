@@ -38,6 +38,7 @@ help: ## Show the available commands.
 	@echo '  make pg PRESET=standard ENV=CartPole-v1 ALGORITHM=a2c'
 	@echo '  make fa PRESET=tuning ENV=Acrobot-v1 ALGORITHM=q_learning ARGS="--lr 0.001"'
 	@echo '  make td PRESET=quick ENV=FrozenLake-v1 ALGORITHM=sarsa'
+	@echo '  make fa PRESET=quick ENV=CartPole-v1 ALGORITHM=td_prediction'
 	@echo '  make fa PRESET=quick ENV=Taxi-v4 ALGORITHM=q_learning'
 	@echo 'Use make <family> ARGS="--help" for authoritative runner options.'
 

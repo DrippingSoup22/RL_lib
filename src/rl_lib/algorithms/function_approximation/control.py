@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep
+from rl_lib.data import EpisodeStep, rollout_arrays
 from rl_lib.models import ActionValueNetwork
 from rl_lib.policies import epsilon_soft_probabilities
 
@@ -44,30 +44,17 @@ class _SemiGradientControl:
         steps: Sequence[EpisodeStep[NDArray[np.float32]]],
         final_state: ArrayLike,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not steps:
-            raise ValueError("Steps must not be empty")
-
-        observations = np.asarray([step.state for step in steps], dtype=np.float32)
-        if observations.shape != (len(steps), self.model.observation_size):
-            raise ValueError("Observations must match the model input size")
-        actions = np.asarray([step.action for step in steps], dtype=np.int64)
-        if np.any((actions < 0) | (actions >= self.model.number_of_actions)):
-            raise ValueError("Actions must stay inside the action space")
-        rewards = np.asarray([step.reward for step in steps], dtype=np.float32)
-        if not np.all(np.isfinite(observations)) or not np.all(np.isfinite(rewards)):
-            raise ValueError("Observations and rewards must be finite")
-
-        final_values = np.asarray(final_state, dtype=np.float32)
-        if final_values.shape != (self.model.observation_size,):
-            raise ValueError("Final state must match the model input size")
-        if not np.all(np.isfinite(final_values)):
-            raise ValueError("Final state must be finite")
-
+        arrays = rollout_arrays(
+            steps,
+            final_state,
+            observation_size=self.model.observation_size,
+            number_of_actions=self.model.number_of_actions,
+        )
         return (
-            torch.as_tensor(observations, dtype=torch.float32),
-            torch.as_tensor(actions, dtype=torch.int64),
-            torch.as_tensor(rewards, dtype=torch.float32),
-            torch.as_tensor(final_values, dtype=torch.float32),
+            torch.as_tensor(arrays.observations),
+            torch.as_tensor(arrays.actions),
+            torch.as_tensor(arrays.rewards),
+            torch.as_tensor(arrays.final_state),
         )
 
     def _update(

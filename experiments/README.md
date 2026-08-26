@@ -32,6 +32,7 @@ The Makefile exposes shared variables and leaves family-specific settings in
 make mc PRESET=quick ENV=Blackjack-v1 ALGORITHM=first_visit_control
 make mc PRESET=standard ENV=Taxi-v4 ALGORITHM=every_visit_control
 make td PRESET=quick ENV=FrozenLake-v1 ALGORITHM=sarsa
+make fa PRESET=quick ENV=CartPole-v1 ALGORITHM=td_prediction
 make fa PRESET=tuning ENV=Acrobot-v1 ALGORITHM=q_learning \
   ARGS="--lr 0.001 --eps 0.1"
 make fa PRESET=quick ENV=Taxi-v4 ALGORITHM=q_learning
@@ -46,7 +47,7 @@ Use `make <family> ARGS="--help"` for the authoritative family-specific CLI.
 Monte Carlo variants are `first_visit_prediction`, `every_visit_prediction`,
 `first_visit_control`, and `every_visit_control`. Temporal-difference variants
 are `td_prediction`, `sarsa`, and `q_learning`. Function approximation provides
-`sarsa` and `q_learning`. Policy gradients provide `reinforce`,
+`td_prediction`, `sarsa`, and `q_learning`. Policy gradients provide `reinforce`,
 `reinforce_with_baseline`, `a2c`, `a3c`, and discrete-action `ppo`.
 
 ## Outputs

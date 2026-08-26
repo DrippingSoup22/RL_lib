@@ -2,11 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-from rl_lib.algorithms.policy_gradient.ppo import (
-    PPO,
-    PPOActionSample,
-    PPOUpdateResult,
-)
+from rl_lib.algorithms.policy_gradient.ppo import PPO
+from rl_lib.data import PPOActionSample, PPOUpdateResult
 from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
 
 

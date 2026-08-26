@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep
+from rl_lib.data import EpisodeStep, rollout_arrays
 from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
 
 
@@ -47,73 +47,23 @@ class A2C:
             action = distribution.sample()
         return int(action.item())
 
-    def _rollout_validation(
+    def _rollout_tensors(
         self,
         steps: Sequence[EpisodeStep[NDArray[np.float32]]],
         final_state: ArrayLike,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        if len(steps) == 0:
-            raise ValueError("Steps mustn't be empty!")
-
-        observations = np.asarray(
-            [step.state for step in steps],
-            dtype=np.float32,
-        )
-        if observations.shape != (
-            len(steps),
-            self.actor_model.observation_size,
-        ):
-            raise ValueError("Episode observations must match the model input size")
-        if not np.all(np.isfinite(observations)):
-            raise ValueError("Episode observations must be finite")
-
-        if any(
-            isinstance(step.action, (bool, np.bool_))
-            or not isinstance(step.action, (int, np.integer))
-            for step in steps
-        ):
-            raise ValueError("Episode actions must be integers")
-        actions = np.asarray(
-            [step.action for step in steps],
-            dtype=np.int64,
-        )
-        if np.any((actions < 0) | (actions >= self.actor_model.number_of_actions)):
-            raise ValueError("Episode actions must stay inside the action space")
-
-        rewards = np.asarray(
-            [step.reward for step in steps],
-            dtype=float,
-        )
-        if not np.all(np.isfinite(rewards)):
-            raise ValueError("Episode rewards must be finite")
-
-        observations_tensor = torch.as_tensor(
-            observations,
-            dtype=torch.float32,
-        )
-        actions_tensor = torch.as_tensor(
-            actions,
-            dtype=torch.int64,
-        )
-        rewards_tensor = torch.as_tensor(
-            rewards,
-            dtype=torch.float32,
-        )
-
-        final_state_array = np.asarray(final_state, dtype=np.float32)
-
-        if not final_state_array.shape == (self.actor_model.observation_size,):
-            raise ValueError("final state must have the correct shape!")
-        if not np.all(np.isfinite(final_state_array)):
-            raise ValueError("All values in final state must be finite!")
-
-        final_state_tensor = torch.as_tensor(
+        arrays = rollout_arrays(
+            steps,
             final_state,
-            dtype=torch.float32,
+            observation_size=self.actor_model.observation_size,
+            number_of_actions=self.actor_model.number_of_actions,
         )
-
-        return observations_tensor, actions_tensor, rewards_tensor, final_state_tensor
+        return (
+            torch.as_tensor(arrays.observations),
+            torch.as_tensor(arrays.actions),
+            torch.as_tensor(arrays.rewards),
+            torch.as_tensor(arrays.final_state),
+        )
 
     def update(
         self,
@@ -124,7 +74,7 @@ class A2C:
     ) -> tuple[float, float]:
 
         observations_tensor, actions_tensor, rewards_tensor, final_state_tensor = (
-            self._rollout_validation(steps, final_state)
+            self._rollout_tensors(steps, final_state)
         )
 
         returns = torch.empty_like(rewards_tensor)

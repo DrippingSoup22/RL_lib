@@ -23,7 +23,7 @@ from experiments.function_approximation.environments import (
     recording_frame_stride,
 )
 
-ALGORITHMS = ("sarsa", "q_learning")
+ALGORITHMS = ("td_prediction", "sarsa", "q_learning")
 DEFAULT_HIDDEN_SIZES = (64, 64)
 
 
@@ -65,8 +65,8 @@ class ExperimentConfig:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run semi-gradient control on flattenable-observation Gymnasium "
-            "environments with discrete actions."
+            "Run semi-gradient prediction or control on flattenable-observation "
+            "Gymnasium environments with discrete actions."
         )
     )
     parser.add_argument("--environment", "--env", "-e", default=KNOWN_ENVIRONMENTS[0])
@@ -209,11 +209,18 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
     if any(hidden_size <= 0 for hidden_size in args.hidden_sizes):
         parser.error("hidden sizes must be positive")
 
-    recording_mode = {
-        "quick": "none",
-        "tuning": "none",
-        "standard": "checkpoints",
-    }[args.preset]
+    is_prediction = args.algorithm == "td_prediction"
+    if is_prediction and args.diagnostics:
+        parser.error("td_prediction does not provide training diagnostics")
+    recording_mode = (
+        "none"
+        if is_prediction
+        else {
+            "quick": "none",
+            "tuning": "none",
+            "standard": "checkpoints",
+        }[args.preset]
+    )
     if args.recordings is not None and args.recordings != recording_mode:
         parser.error(f"{args.preset} mode requires --recordings {recording_mode}")
     recording_checkpoints = {
@@ -253,8 +260,10 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
             else "flattened one-hot encoding"
         )
     )
-    if args.preset == "standard" and "rgb_array" not in inspection_env.metadata.get(
-        "render_modes", []
+    if (
+        args.preset == "standard"
+        and not is_prediction
+        and "rgb_array" not in inspection_env.metadata.get("render_modes", [])
     ):
         inspection_env.close()
         parser.error("standard mode requires an environment with rgb_array rendering")
@@ -304,7 +313,7 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
 
 
 def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "status": "running",
         "environment": config.environment,
         "preset": config.preset,
@@ -382,3 +391,24 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
         "torch_threads": torch.get_num_threads(),
         "torch_interop_threads": torch.get_num_interop_threads(),
     }
+    if config.algorithm == "td_prediction":
+        metadata.update(
+            {
+                "initial_epsilon": None,
+                "sarsa_final_epsilon": None,
+                "sarsa_epsilon_schedule": None,
+                "q_learning_final_epsilon": None,
+                "q_learning_epsilon_schedule": None,
+                "prediction_policy": "uniform random",
+                "validation_episodes": None,
+                "validation_environment_seed": None,
+                "validation_selection": None,
+                "reported_checkpoint_policy": "current estimator at each checkpoint",
+                "evaluation_policy": "frozen value estimator under prediction policy",
+                "prediction_target": "discounted Monte Carlo episode return",
+                "success_definition": None,
+                "progress_metric": None,
+                "progress_goal": None,
+            }
+        )
+    return metadata

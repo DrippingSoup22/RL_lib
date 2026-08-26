@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from rl_lib.data import EpisodeStep
+from rl_lib.data import EpisodeStep, discounted_returns
 
 
 class TDPrediction:
@@ -49,11 +49,11 @@ class TDPrediction:
             if not np.isfinite(step.reward):
                 raise ValueError("Reward must be finite")
 
-        running_return = 0.0 if terminated else float(self.V[final_state])
-        returns = np.empty(len(steps), dtype=float)
-        for index in range(len(steps) - 1, -1, -1):
-            running_return = steps[index].reward + self.discount * running_return
-            returns[index] = running_return
+        returns = discounted_returns(
+            [step.reward for step in steps],
+            self.discount,
+            bootstrap=0.0 if terminated else float(self.V[final_state]),
+        )
 
         errors = []
         for step, target in zip(steps, returns, strict=True):

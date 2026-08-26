@@ -9,9 +9,9 @@ import torch
 from experiments.policy_gradient.runners.common import Observation, observation_array
 from rl_lib.algorithms.policy_gradient import (
     PPO,
-    PPOUpdateResult,
     generalized_advantage_estimates,
 )
+from rl_lib.data import PPOUpdateResult
 
 
 @dataclass(frozen=True)

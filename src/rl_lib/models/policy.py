@@ -1,5 +1,6 @@
-"""Neural policy models for discrete action spaces."""
+"""Neural policy models for discrete and continuous action spaces."""
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -39,3 +40,68 @@ class DiscretePolicyNetwork(nn.Module):
 
     def forward(self, observation: torch.Tensor) -> torch.Tensor:
         return self.network(observation)
+
+
+class GaussianPolicyNetwork(nn.Module):
+    """Map observations to a diagonal Gaussian's mean and standard deviation."""
+
+    def __init__(
+        self,
+        observation_size: int,
+        action_size: int,
+        hidden_sizes: tuple[int, ...] = (64, 64),
+        initial_std: float = 1.0,
+    ) -> None:
+        super().__init__()
+
+        if observation_size <= 0:
+            raise ValueError("Observation size must be greater than 0")
+        if action_size <= 0:
+            raise ValueError("Action size must be greater than 0")
+        if any(hidden_size <= 0 for hidden_size in hidden_sizes):
+            raise ValueError("All hidden sizes must be greater than 0")
+        if not np.isfinite(initial_std) or initial_std <= 0:
+            raise ValueError("Initial std must be finite and greater than 0!")
+
+        self.observation_size = observation_size
+        self.action_size = action_size
+        self.hidden_sizes = hidden_sizes
+
+        mean_input_size = observation_size
+        std_input_size = observation_size
+        mean_layers = []
+        log_std_layers = []
+
+        for hidden_size in hidden_sizes:
+            mean_layers.append(nn.Linear(mean_input_size, hidden_size))
+            mean_layers.append(nn.ReLU())
+            mean_input_size = hidden_size
+        mean_layers.append(nn.Linear(mean_input_size, action_size))
+
+        self.mean_network = nn.Sequential(*mean_layers)
+
+        for hidden_size in hidden_sizes:
+            log_std_layers.append(nn.Linear(std_input_size, hidden_size))
+            log_std_layers.append(nn.ReLU())
+            std_input_size = hidden_size
+
+        log_std_output = nn.Linear(std_input_size, action_size)
+        nn.init.zeros_(log_std_output.weight)
+        nn.init.constant_(log_std_output.bias, float(np.log(initial_std)))
+        log_std_layers.append(log_std_output)
+
+        self.log_std_network = nn.Sequential(*log_std_layers)
+
+    def forward(
+        self,
+        observation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mean = self.mean_network(observation)
+        log_standard_deviation = torch.clamp(
+            self.log_std_network(observation),
+            min=-20.0,
+            max=2.0,
+        )
+        standard_deviation = torch.exp(log_standard_deviation)
+
+        return mean, standard_deviation

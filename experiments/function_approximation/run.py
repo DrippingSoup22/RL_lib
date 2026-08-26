@@ -1,4 +1,4 @@
-"""Run semi-gradient control on continuous-observation Gymnasium environments."""
+"""Run semi-gradient prediction and control on Gymnasium environments."""
 
 from __future__ import annotations
 
@@ -34,13 +34,19 @@ from experiments.function_approximation.environments import (
     make_environment,
     progress_value,
 )
-from experiments.function_approximation.report import CSV_FIELDS, write_report
+from experiments.function_approximation.report import (
+    CONTROL_CSV_FIELDS,
+    PREDICTION_CSV_FIELDS,
+    write_control_report,
+    write_prediction_report,
+)
 from rl_lib.algorithms.function_approximation import (
     SemiGradientQLearning,
     SemiGradientSARSA,
+    SemiGradientTDPrediction,
 )
-from rl_lib.data import EpisodeStep
-from rl_lib.models import ActionValueNetwork
+from rl_lib.data import EpisodeStep, discounted_returns
+from rl_lib.models import ActionValueNetwork, StateValueNetwork
 
 DIAGNOSTIC_FIELDS = (
     "algorithm",
@@ -150,6 +156,31 @@ def make_agent(
     )
 
 
+def make_prediction_agent(
+    env: gym.Env,
+    *,
+    learning_rate: float,
+    discount: float,
+    optimizer_name: str,
+    hidden_sizes: tuple[int, ...],
+    seed: int,
+) -> SemiGradientTDPrediction:
+    """Create a state-value estimator for the fixed prediction policy."""
+    if not isinstance(env.observation_space, gym.spaces.Box):
+        raise ValueError("environment must have a Box observation space")
+
+    observation_size = int(np.prod(env.observation_space.shape))
+    torch.manual_seed(seed)
+    model = StateValueNetwork(observation_size, hidden_sizes=hidden_sizes)
+    if optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    elif optimizer_name == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    else:
+        raise ValueError("optimizer must be 'sgd' or 'adam'")
+    return SemiGradientTDPrediction(model, optimizer, discount=discount)
+
+
 @dataclass(frozen=True)
 class EpisodeResult:
     episode_return: float
@@ -255,6 +286,103 @@ def train_episode(
         truncated=truncated,
         diagnostics=tracker.finish() if tracker is not None else None,
     )
+
+
+def train_prediction_episode(
+    env: gym.Env,
+    predictor: SemiGradientTDPrediction,
+    *,
+    environment_seed: int,
+    action_seed: int,
+    rollout_steps: int,
+) -> EpisodeResult:
+    """Train the value estimator for one episode of the fixed policy."""
+    if not isinstance(env.action_space, gym.spaces.Discrete):
+        raise ValueError("environment must have a Discrete action space")
+    number_of_actions = int(env.action_space.n)
+    rng = np.random.default_rng(action_seed)
+    observation, _ = env.reset(seed=environment_seed)
+    rollout: list[EpisodeStep[np.ndarray]] = []
+    episode_return = 0.0
+    episode_length = 0
+    terminated = truncated = False
+    while not (terminated or truncated):
+        action = int(rng.integers(number_of_actions))
+        next_observation, reward, terminated, truncated, _ = env.step(action)
+        rollout.append(
+            EpisodeStep(
+                np.asarray(observation, dtype=np.float32).copy(),
+                action,
+                float(reward),
+            )
+        )
+        episode_return += float(reward)
+        episode_length += 1
+        if len(rollout) == rollout_steps or terminated or truncated:
+            predictor.update(
+                tuple(rollout),
+                next_observation,
+                terminated=terminated,
+            )
+            rollout.clear()
+        observation = next_observation
+
+    return EpisodeResult(
+        episode_return=episode_return,
+        episode_length=episode_length,
+        terminated=terminated,
+        truncated=truncated,
+    )
+
+
+def evaluate_prediction_episode(
+    env: gym.Env,
+    predictor: SemiGradientTDPrediction,
+    *,
+    environment_seed: int,
+    action_seed: int,
+) -> dict[str, float | int]:
+    """Compare frozen predictions with held-out Monte Carlo returns."""
+    if not isinstance(env.action_space, gym.spaces.Discrete):
+        raise ValueError("environment must have a Discrete action space")
+    number_of_actions = int(env.action_space.n)
+    rng = np.random.default_rng(action_seed)
+    observations: list[np.ndarray] = []
+    rewards: list[float] = []
+    observation, _ = env.reset(seed=environment_seed)
+    terminated = truncated = False
+    while not (terminated or truncated):
+        action = int(rng.integers(number_of_actions))
+        observations.append(np.asarray(observation, dtype=np.float32).copy())
+        observation, reward, terminated, truncated, _ = env.step(action)
+        rewards.append(float(reward))
+
+    was_training = predictor.model.training
+    predictor.model.eval()
+    try:
+        with torch.no_grad():
+            predictions = (
+                predictor.model(
+                    torch.as_tensor(np.asarray(observations), dtype=torch.float32)
+                )
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+            )
+    finally:
+        predictor.model.train(was_training)
+    targets = discounted_returns(rewards, predictor.discount)
+    errors = predictions - targets
+    return {
+        "episode_return": float(np.sum(rewards)),
+        "episode_length": len(rewards),
+        "terminated": int(terminated),
+        "truncated": int(truncated),
+        "mean_absolute_error": float(np.mean(np.abs(errors))),
+        "root_mean_squared_error": float(np.sqrt(np.mean(np.square(errors)))),
+        "mean_error": float(np.mean(errors)),
+    }
 
 
 def model_action_values(agent: Agent, observation: np.ndarray) -> np.ndarray:
@@ -455,6 +583,131 @@ def print_diagnostic_summary(rows: list[dict[str, object]]) -> None:
     )
 
 
+def run_prediction(
+    environment: str,
+    *,
+    training_episodes: int,
+    evaluation_episodes: int,
+    seed_values: tuple[int, ...],
+    learning_rate: float,
+    minimum_learning_rate: float,
+    discount: float,
+    optimizer_name: str,
+    hidden_sizes: tuple[int, ...],
+    rollout_steps: int,
+    metrics_path: Path | None,
+    model_path: Path | None,
+    checkpoints: tuple[int, ...],
+) -> tuple[list[dict[str, object]], int]:
+    """Train and evaluate semi-gradient TD prediction under a fixed policy."""
+    rows: list[dict[str, object]] = []
+    final_model_states: dict[int, ModelState] = {}
+    for trial_index, seed in enumerate(seed_values):
+        print(
+            f"td_prediction: seed trial {trial_index + 1}/{len(seed_values)} "
+            f"(seed={seed})",
+            flush=True,
+        )
+        training_env = make_environment(environment)
+        evaluation_env = make_environment(environment)
+        predictor = make_prediction_agent(
+            training_env,
+            learning_rate=learning_rate,
+            discount=discount,
+            optimizer_name=optimizer_name,
+            hidden_sizes=hidden_sizes,
+            seed=seed,
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            predictor.optimizer,
+            T_max=max(1, training_episodes - 1),
+            eta_min=minimum_learning_rate,
+        )
+        completed_episodes = 0
+        for checkpoint in checkpoints:
+            target_episodes = checkpoint_episode_target(
+                training_episodes,
+                checkpoint,
+            )
+            print(
+                f"  checkpoint {checkpoint}%: train to {target_episodes}, "
+                f"then evaluate {evaluation_episodes} episodes",
+                flush=True,
+            )
+            while completed_episodes < target_episodes:
+                train_prediction_episode(
+                    training_env,
+                    predictor,
+                    environment_seed=(seed * training_episodes + completed_episodes),
+                    action_seed=(
+                        10_000_000 + seed * training_episodes + completed_episodes
+                    ),
+                    rollout_steps=rollout_steps,
+                )
+                scheduler.step()
+                completed_episodes += 1
+            checkpoint_rows = []
+            for evaluation_episode in range(evaluation_episodes):
+                result = {
+                    "algorithm": "td_prediction",
+                    "seed": seed,
+                    "checkpoint": checkpoint,
+                    "evaluation_episode": evaluation_episode,
+                    **evaluate_prediction_episode(
+                        evaluation_env,
+                        predictor,
+                        environment_seed=(
+                            1_000_000
+                            + seed * 100_000
+                            + checkpoint * 1_000
+                            + evaluation_episode
+                        ),
+                        action_seed=(
+                            11_000_000
+                            + seed * 100_000
+                            + checkpoint * 1_000
+                            + evaluation_episode
+                        ),
+                    ),
+                }
+                checkpoint_rows.append(result)
+                rows.append(result)
+            mean_rmse = float(
+                np.mean(
+                    [float(row["root_mean_squared_error"]) for row in checkpoint_rows]
+                )
+            )
+            print(f"    held-out rmse={mean_rmse:.3f}", flush=True)
+            if metrics_path is not None:
+                write_csv(metrics_path, PREDICTION_CSV_FIELDS, rows)
+
+        final_model_states[seed] = copy_model_state(predictor.model)
+        training_env.close()
+        evaluation_env.close()
+
+    final_scores = {}
+    for seed in seed_values:
+        selected = [
+            row
+            for row in rows
+            if int(row["seed"]) == seed and int(row["checkpoint"]) == 100
+        ]
+        final_scores[seed] = float(
+            np.mean([float(row["root_mean_squared_error"]) for row in selected])
+        )
+    selected_seed = min(final_scores, key=final_scores.__getitem__)
+    if model_path is not None:
+        torch.save(
+            {
+                "algorithm": "td_prediction",
+                "seed": selected_seed,
+                "model_state_dict": final_model_states[selected_seed],
+            },
+            model_path,
+        )
+    return rows, selected_seed
+
+
 def run_control(
     environment: str,
     selected_algorithm: str,
@@ -633,7 +886,7 @@ def run_control(
                     )
                 )
             if metrics_path is not None:
-                write_csv(metrics_path, CSV_FIELDS, rows)
+                write_csv(metrics_path, CONTROL_CSV_FIELDS, rows)
 
             if checkpoint in recording_checkpoints or (
                 model_path is not None and checkpoint == 100
@@ -718,37 +971,57 @@ def main() -> None:
     metadata = initial_metadata(config)
     if output is not None:
         write_metadata(output / "metadata.json", metadata)
-    rows, selected_seed = run_control(
-        config.environment,
-        config.algorithm,
-        training_episodes=config.training_episodes,
-        evaluation_episodes=config.evaluation_episodes,
-        seed_values=config.seed_values,
-        learning_rate=config.learning_rate,
-        minimum_learning_rate=config.minimum_learning_rate,
-        discount=config.discount,
-        initial_epsilon=config.epsilon,
-        sarsa_final_epsilon=config.sarsa_final_epsilon,
-        optimizer_name=config.optimizer,
-        hidden_sizes=config.hidden_sizes,
-        rollout_steps=config.rollout_steps,
-        recordings_directory=recordings_directory,
-        metrics_path=output / "metrics.csv" if output is not None else None,
-        diagnostics_path=(
-            output / "training_diagnostics.csv"
-            if config.diagnostics and output is not None
-            else None
-        ),
-        model_path=(
-            output / "best_model.pt"
-            if output is not None and config.preset == "standard"
-            else None
-        ),
-        validation_episodes=config.validation_episodes,
-        recording_checkpoints=config.recording_checkpoints,
-        checkpoints=config.checkpoints,
-        frame_stride=config.frame_stride,
+    metrics_path = output / "metrics.csv" if output is not None else None
+    diagnostics_path = (
+        output / "training_diagnostics.csv"
+        if config.diagnostics and output is not None
+        else None
     )
+    model_path = (
+        output / "best_model.pt"
+        if output is not None and config.preset == "standard"
+        else None
+    )
+    if config.algorithm == "td_prediction":
+        rows, selected_seed = run_prediction(
+            config.environment,
+            training_episodes=config.training_episodes,
+            evaluation_episodes=config.evaluation_episodes,
+            seed_values=config.seed_values,
+            learning_rate=config.learning_rate,
+            minimum_learning_rate=config.minimum_learning_rate,
+            discount=config.discount,
+            optimizer_name=config.optimizer,
+            hidden_sizes=config.hidden_sizes,
+            rollout_steps=config.rollout_steps,
+            metrics_path=metrics_path,
+            model_path=model_path,
+            checkpoints=config.checkpoints,
+        )
+    else:
+        rows, selected_seed = run_control(
+            config.environment,
+            config.algorithm,
+            training_episodes=config.training_episodes,
+            evaluation_episodes=config.evaluation_episodes,
+            seed_values=config.seed_values,
+            learning_rate=config.learning_rate,
+            minimum_learning_rate=config.minimum_learning_rate,
+            discount=config.discount,
+            initial_epsilon=config.epsilon,
+            sarsa_final_epsilon=config.sarsa_final_epsilon,
+            optimizer_name=config.optimizer,
+            hidden_sizes=config.hidden_sizes,
+            rollout_steps=config.rollout_steps,
+            recordings_directory=recordings_directory,
+            metrics_path=metrics_path,
+            diagnostics_path=diagnostics_path,
+            model_path=model_path,
+            validation_episodes=config.validation_episodes,
+            recording_checkpoints=config.recording_checkpoints,
+            checkpoints=config.checkpoints,
+            frame_stride=config.frame_stride,
+        )
     if output is None:
         print(
             "Quick compatibility run complete; no artifacts were written.",
@@ -761,10 +1034,17 @@ def main() -> None:
         if config.recording_checkpoints
         else None
     )
-    metadata["selected_seed"] = selected_seed if config.recording_checkpoints else None
+    metadata["selected_seed"] = (
+        selected_seed
+        if config.algorithm == "td_prediction" or config.recording_checkpoints
+        else None
+    )
     metadata["model_file"] = "best_model.pt" if config.preset == "standard" else None
     metadata["model_seed"] = selected_seed if config.preset == "standard" else None
-    write_report(output, rows, metadata)
+    if config.algorithm == "td_prediction":
+        write_prediction_report(output, rows, metadata)
+    else:
+        write_control_report(output, rows, metadata)
     metadata["status"] = "complete"
     write_metadata(output / "metadata.json", metadata)
     print(f"Complete: {output}", flush=True)

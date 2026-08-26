@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import Episode, discounted_returns
+from rl_lib.data import Episode, discounted_returns, rollout_arrays
 from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
 
 
@@ -38,56 +38,18 @@ class Reinforce:
         self,
         episode: Episode[NDArray[np.float32]],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not episode.steps:
-            raise ValueError("Episode must contain at least one step")
-
-        observations = np.asarray(
-            [step.state for step in episode.steps],
-            dtype=np.float32,
+        arrays = rollout_arrays(
+            episode.steps,
+            episode.final_state,
+            observation_size=self.actor_model.observation_size,
+            number_of_actions=self.actor_model.number_of_actions,
         )
-        if observations.shape != (
-            len(episode.steps),
-            self.actor_model.observation_size,
-        ):
-            raise ValueError("Episode observations must match the model input size")
-        if not np.all(np.isfinite(observations)):
-            raise ValueError("Episode observations must be finite")
-
-        if any(
-            isinstance(step.action, (bool, np.bool_))
-            or not isinstance(step.action, (int, np.integer))
-            for step in episode.steps
-        ):
-            raise ValueError("Episode actions must be integers")
-        actions = np.asarray(
-            [step.action for step in episode.steps],
-            dtype=np.int64,
+        returns = discounted_returns(arrays.rewards, self.discount)
+        return (
+            torch.as_tensor(arrays.observations),
+            torch.as_tensor(arrays.actions),
+            torch.as_tensor(returns, dtype=torch.float32),
         )
-        if np.any((actions < 0) | (actions >= self.actor_model.number_of_actions)):
-            raise ValueError("Episode actions must stay inside the action space")
-
-        rewards = np.asarray(
-            [step.reward for step in episode.steps],
-            dtype=float,
-        )
-        if not np.all(np.isfinite(rewards)):
-            raise ValueError("Episode rewards must be finite")
-
-        returns = discounted_returns(rewards, self.discount)
-
-        observations_tensor = torch.as_tensor(
-            observations,
-            dtype=torch.float32,
-        )
-        actions_tensor = torch.as_tensor(
-            actions,
-            dtype=torch.int64,
-        )
-        returns_tensor = torch.as_tensor(
-            returns,
-            dtype=torch.float32,
-        )
-        return observations_tensor, actions_tensor, returns_tensor
 
     def update(self, episode: Episode[NDArray[np.float32]]) -> float:
 

@@ -4,8 +4,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from rl_lib.data import EpisodeStep
-from rl_lib.policies.tabular import TabularPolicy, epsilon_soft_probabilities
+from rl_lib.data import EpisodeStep, discounted_returns
+from rl_lib.policies import TabularPolicy, epsilon_soft_probabilities
 
 
 class _TabularControl:
@@ -67,11 +67,11 @@ class _TabularControl:
         steps: Sequence[EpisodeStep[int]],
         bootstrap: float,
     ) -> tuple[float, ...]:
-        returns = np.empty(len(steps), dtype=float)
-        running_return = bootstrap
-        for index in range(len(steps) - 1, -1, -1):
-            running_return = steps[index].reward + self.discount * running_return
-            returns[index] = running_return
+        returns = discounted_returns(
+            [step.reward for step in steps],
+            self.discount,
+            bootstrap=bootstrap,
+        )
 
         errors = []
         for step, target in zip(steps, returns, strict=True):

@@ -46,6 +46,7 @@ Run the implemented experiments with:
 make ba
 make mc PRESET=quick ENV=Blackjack-v1 ALGORITHM=first_visit_control
 make td PRESET=quick ENV=FrozenLake-v1 ALGORITHM=sarsa
+make fa PRESET=quick ENV=CartPole-v1 ALGORITHM=td_prediction
 make fa PRESET=quick ENV=Taxi-v4 ALGORITHM=q_learning
 make fa PRESET=tuning ENV=Acrobot-v1 ALGORITHM=q_learning \
   ARGS="--lr 0.001 --eps 0.1"

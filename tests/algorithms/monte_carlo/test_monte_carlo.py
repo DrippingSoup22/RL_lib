@@ -7,7 +7,7 @@ from rl_lib.algorithms.monte_carlo import (
     FirstVisitMonteCarloControl,
     FirstVisitMonteCarloPrediction,
 )
-from rl_lib.data.episode import Episode, EpisodeStep, discounted_returns
+from rl_lib.data import Episode, EpisodeStep, discounted_returns
 from rl_lib.policies import epsilon_soft_probabilities, policy_from_action_values
 
 
@@ -25,6 +25,13 @@ def repeated_state_episode() -> Episode[int]:
 
 def test_discounted_returns_are_computed_backwards() -> None:
     np.testing.assert_allclose(discounted_returns([1, 2, 3], 0.5), [2.75, 3.5, 3])
+
+
+def test_discounted_returns_can_bootstrap_after_the_final_reward() -> None:
+    np.testing.assert_allclose(
+        discounted_returns([1, 2], 0.5, bootstrap=4.0),
+        [3.0, 4.0],
+    )
 
 
 def test_first_and_every_visit_prediction_count_different_samples() -> None:

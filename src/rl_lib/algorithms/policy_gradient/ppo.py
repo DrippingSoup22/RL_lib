@@ -1,26 +1,11 @@
 """Clipped proximal policy optimization for discrete actions."""
 
-from dataclasses import dataclass
-
 import numpy as np
 import torch
 from numpy.typing import ArrayLike
 
+from rl_lib.data import PPOActionSample, PPOUpdateResult
 from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
-
-
-@dataclass(frozen=True)
-class PPOActionSample:
-    action: int
-    log_probability: float
-    value: float
-
-
-@dataclass(frozen=True)
-class PPOUpdateResult:
-    actor_loss: float
-    critic_loss: float
-    entropy: float
 
 
 class PPO:

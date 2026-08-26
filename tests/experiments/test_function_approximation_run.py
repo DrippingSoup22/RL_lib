@@ -8,10 +8,13 @@ from experiments.function_approximation.run import (
     EvaluationResult,
     algorithm_final_epsilon,
     copy_model_state,
+    evaluate_prediction_episode,
     evaluation_score,
     linearly_decayed_epsilon,
     make_agent,
+    make_prediction_agent,
     train_episode,
+    train_prediction_episode,
 )
 
 
@@ -110,6 +113,25 @@ def test_observation_scaling_metadata_matches_the_environment_wrapper() -> None:
     assert not cart_pole.observations_rescaled
 
 
+@pytest.mark.parametrize("preset", ("quick", "tuning", "standard"))
+def test_td_prediction_uses_no_behavior_recordings(preset: str) -> None:
+    config = parse_config(
+        (
+            "--preset",
+            preset,
+            "--algorithm",
+            "td_prediction",
+            "--environment",
+            "CartPole-v1",
+            "--seed-base",
+            "0",
+        )
+    )
+
+    assert config.recording_mode == "none"
+    assert config.recording_checkpoints == ()
+
+
 @pytest.mark.parametrize("algorithm", ("sarsa", "q_learning"))
 def test_function_approximation_runner_flushes_n_step_truncation(
     algorithm: str,
@@ -142,4 +164,67 @@ def test_function_approximation_runner_flushes_n_step_truncation(
     assert result.episode_length == 1
     assert result.diagnostics is not None
     assert np.isfinite(result.diagnostics.mean_absolute_td_error)
+    env.close()
+
+
+def test_td_prediction_runner_flushes_n_step_truncation() -> None:
+    env = gym.wrappers.RescaleObservation(
+        gym.make("MountainCar-v0", max_episode_steps=1),
+        np.float32(-1.0),
+        np.float32(1.0),
+    )
+    predictor = make_prediction_agent(
+        env,
+        learning_rate=0.001,
+        discount=0.99,
+        optimizer_name="sgd",
+        hidden_sizes=(4,),
+        seed=0,
+    )
+
+    result = train_prediction_episode(
+        env,
+        predictor,
+        environment_seed=0,
+        action_seed=0,
+        rollout_steps=3,
+    )
+
+    assert result.truncated
+    assert not result.terminated
+    assert result.episode_length == 1
+    env.close()
+
+
+def test_td_prediction_evaluation_is_frozen_and_reports_finite_errors() -> None:
+    env = gym.make("CartPole-v1")
+    predictor = make_prediction_agent(
+        env,
+        learning_rate=0.001,
+        discount=0.99,
+        optimizer_name="sgd",
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    before = copy_model_state(predictor.model)
+
+    result = evaluate_prediction_episode(
+        env,
+        predictor,
+        environment_seed=0,
+        action_seed=0,
+    )
+
+    assert int(result["episode_length"]) > 0
+    assert np.all(
+        np.isfinite(
+            (
+                result["mean_absolute_error"],
+                result["root_mean_squared_error"],
+                result["mean_error"],
+            )
+        )
+    )
+    for name, value in predictor.model.state_dict().items():
+        torch.testing.assert_close(value, before[name])
     env.close()

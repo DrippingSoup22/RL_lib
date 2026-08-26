@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep
+from rl_lib.data import EpisodeStep, rollout_arrays
 from rl_lib.models import StateValueNetwork
 
 
@@ -33,25 +33,14 @@ class SemiGradientTDPrediction:
         terminated: bool,
     ) -> tuple[float, ...]:
         """Take one semi-gradient update over a complete rollout."""
-        if not steps:
-            raise ValueError("Steps must not be empty")
-
-        observations = np.asarray([step.state for step in steps], dtype=np.float32)
-        if observations.shape != (len(steps), self.model.observation_size):
-            raise ValueError("Observations must match the model input size")
-        rewards = np.asarray([step.reward for step in steps], dtype=np.float32)
-        if not np.all(np.isfinite(observations)) or not np.all(np.isfinite(rewards)):
-            raise ValueError("Observations and rewards must be finite")
-
-        final_values = np.asarray(final_state, dtype=np.float32)
-        if final_values.shape != (self.model.observation_size,):
-            raise ValueError("Final state must match the model input size")
-        if not np.all(np.isfinite(final_values)):
-            raise ValueError("Final state must be finite")
-
-        observations_tensor = torch.as_tensor(observations, dtype=torch.float32)
-        rewards_tensor = torch.as_tensor(rewards, dtype=torch.float32)
-        final_state_tensor = torch.as_tensor(final_values, dtype=torch.float32)
+        arrays = rollout_arrays(
+            steps,
+            final_state,
+            observation_size=self.model.observation_size,
+        )
+        observations_tensor = torch.as_tensor(arrays.observations)
+        rewards_tensor = torch.as_tensor(arrays.rewards)
+        final_state_tensor = torch.as_tensor(arrays.final_state)
 
         returns = torch.empty_like(rewards_tensor)
         with torch.no_grad():

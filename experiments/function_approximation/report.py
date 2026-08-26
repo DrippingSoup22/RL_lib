@@ -15,7 +15,7 @@ from experiments.common import (
 )
 from experiments.summary import SummaryMedia, SummaryTable, write_summary
 
-CSV_FIELDS = (
+CONTROL_CSV_FIELDS = (
     "algorithm",
     "seed",
     "checkpoint",
@@ -28,6 +28,19 @@ CSV_FIELDS = (
     "terminated",
     "truncated",
     "progress",
+)
+PREDICTION_CSV_FIELDS = (
+    "algorithm",
+    "seed",
+    "checkpoint",
+    "evaluation_episode",
+    "episode_return",
+    "episode_length",
+    "terminated",
+    "truncated",
+    "mean_absolute_error",
+    "root_mean_squared_error",
+    "mean_error",
 )
 
 
@@ -92,12 +105,12 @@ def _mean_std(row: dict[str, object], metric: str) -> str:
     return f"{float(row[metric]):.3f} +/- {float(row[f'{metric}_std']):.3f}"
 
 
-def write_report(
+def write_control_report(
     output: Path,
     rows: list[dict[str, object]],
     metadata: dict[str, object],
 ) -> None:
-    write_csv(output / "metrics.csv", CSV_FIELDS, rows)
+    write_csv(output / "metrics.csv", CONTROL_CSV_FIELDS, rows)
     write_metadata(output / "metadata.json", metadata)
     aggregate = _aggregates(rows)
     progress_label = str(metadata["progress_metric"])
@@ -248,3 +261,140 @@ def write_report(
         recordings=recordings,
         compact=metadata["preset"] == "tuning",
     )
+
+
+def _prediction_mean(
+    rows: list[dict[str, object]],
+    seed: int,
+    checkpoint: int,
+    metric: str,
+) -> float:
+    values = [
+        float(row[metric])
+        for row in rows
+        if int(row["seed"]) == seed and int(row["checkpoint"]) == checkpoint
+    ]
+    return float(np.mean(values))
+
+
+def write_prediction_report(
+    output: Path,
+    rows: list[dict[str, object]],
+    metadata: dict[str, object],
+) -> None:
+    """Write measured value-estimation errors for the fixed prediction policy."""
+    write_csv(output / "metrics.csv", PREDICTION_CSV_FIELDS, rows)
+    write_metadata(output / "metadata.json", metadata)
+    seed_values = sorted({int(row["seed"]) for row in rows})
+    seed_curves = {
+        seed: [
+            _prediction_mean(rows, seed, checkpoint, "root_mean_squared_error")
+            for checkpoint in EVALUATION_CHECKPOINTS
+        ]
+        for seed in seed_values
+    }
+    figure, axis = plt.subplots(figsize=(7, 4))
+    if len(seed_values) > 1:
+        for seed_index, seed in enumerate(seed_values):
+            axis.plot(
+                EVALUATION_CHECKPOINTS,
+                seed_curves[seed],
+                linestyle=("-", "--", ":", "-.")[seed_index % 4],
+                alpha=0.4,
+                marker="o",
+            )
+    axis.plot(
+        EVALUATION_CHECKPOINTS,
+        np.mean(list(seed_curves.values()), axis=0),
+        linewidth=2.6,
+        marker="o",
+        label="Across-seed mean",
+    )
+    axis.set_xlabel("Training completed (%)")
+    axis.set_ylabel("Root mean squared error")
+    axis.set_xticks(EVALUATION_CHECKPOINTS)
+    axis.grid(alpha=0.25)
+    axis.legend()
+    axis.set_title("TD prediction held-out error")
+    figure.tight_layout()
+    figure.savefig(output / "figures" / "prediction_error.png", dpi=150)
+    plt.close(figure)
+
+    final_by_seed = {
+        seed: {
+            metric: _prediction_mean(rows, seed, 100, metric)
+            for metric in (
+                "root_mean_squared_error",
+                "mean_absolute_error",
+                "mean_error",
+            )
+        }
+        for seed in seed_values
+    }
+    final_rows = [
+        (
+            f"Seed {seed}",
+            f"{values['root_mean_squared_error']:.3f}",
+            f"{values['mean_absolute_error']:.3f}",
+            f"{values['mean_error']:.3f}",
+            (
+                "yes"
+                if metadata["preset"] == "standard"
+                and seed == int(metadata["selected_seed"])
+                else "no"
+            ),
+        )
+        for seed, values in final_by_seed.items()
+    ]
+    if len(seed_values) > 1:
+        final_rows.insert(
+            0,
+            (
+                "All seeds",
+                _format_prediction_mean_std(final_by_seed, "root_mean_squared_error"),
+                _format_prediction_mean_std(final_by_seed, "mean_absolute_error"),
+                _format_prediction_mean_std(final_by_seed, "mean_error"),
+                "-",
+            ),
+        )
+    write_summary(
+        output / "summary.html",
+        title=f"Semi-gradient TD prediction on {metadata['environment']}",
+        metadata={
+            "Environment": metadata["environment"],
+            "Mode": metadata["preset"],
+            "Policy": metadata["prediction_policy"],
+            "Training": f"{metadata['training_episodes']} episodes per seed",
+            "Evaluation": f"{metadata['evaluation_episodes']} episodes per checkpoint",
+            "Seed trials": metadata["seed_values"],
+            "Network": metadata["hidden_sizes"],
+            "Optimizer": metadata["optimizer"],
+            "Learning rate": metadata["learning_rate"],
+            "Best model": (
+                "best_model.pt" if metadata["preset"] == "standard" else "not saved"
+            ),
+        },
+        tables=(
+            SummaryTable(
+                "Final held-out prediction error",
+                ("Result", "RMSE", "MAE", "Mean error", "Saved"),
+                tuple(final_rows),
+            ),
+        ),
+        figures=(
+            SummaryMedia(
+                "Held-out prediction error", Path("figures/prediction_error.png")
+            ),
+        ),
+        compact=metadata["preset"] == "tuning",
+    )
+
+
+def _format_prediction_mean_std(
+    values_by_seed: dict[int, dict[str, float]],
+    metric: str,
+) -> str:
+    values = np.asarray(
+        [values[metric] for values in values_by_seed.values()], dtype=float
+    )
+    return f"{np.mean(values):.3f} +/- {np.std(values, ddof=1):.3f}"

@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from rl_lib.data.episode import Episode, discounted_returns
-from rl_lib.policies.tabular import TabularPolicy, epsilon_soft_probabilities
+from rl_lib.data import Episode, discounted_returns
+from rl_lib.policies import TabularPolicy, epsilon_soft_probabilities
 
 
 class FirstVisitMonteCarloControl:

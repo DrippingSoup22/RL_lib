@@ -47,7 +47,7 @@ from rl_lib.algorithms.monte_carlo import (
     FirstVisitMonteCarloControl,
     FirstVisitMonteCarloPrediction,
 )
-from rl_lib.data.episode import Episode, EpisodeStep
+from rl_lib.data import Episode, EpisodeStep
 
 ALGORITHMS = (
     "first_visit_prediction",

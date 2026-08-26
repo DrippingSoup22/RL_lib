@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from rl_lib.data.episode import Episode, discounted_returns
+from rl_lib.data import Episode, discounted_returns
 
 
 class FirstVisitMonteCarloPrediction:
