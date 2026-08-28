@@ -7,7 +7,11 @@ from numpy.typing import NDArray
 
 from rl_lib.algorithms.policy_gradient import Reinforce, ReinforceWithBaseline
 from rl_lib.data import Episode, EpisodeStep
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
 
 Observation = NDArray[np.float32]
 
@@ -80,6 +84,56 @@ def test_reinforce_increases_probability_of_a_rewarded_action() -> None:
             agent.actor_model(torch.as_tensor(state)), dim=-1
         )[0].item()
     assert probability_after > probability_before
+
+
+def test_continuous_reinforce_updates_from_stored_latent_action() -> None:
+    actor_model = GaussianPolicyNetwork(1, 1, hidden_sizes=(), initial_std=0.5)
+    with torch.no_grad():
+        actor_model.mean_network[0].weight.zero_()
+        actor_model.mean_network[0].bias.zero_()
+    agent = Reinforce(
+        actor_model,
+        torch.optim.SGD(actor_model.parameters(), lr=0.1),
+        action_low=[-1.0],
+        action_high=[1.0],
+    )
+    state = observation(1.0)
+    latent_action = np.asarray([0.5], dtype=np.float32)
+    episode = Episode(
+        steps=(
+            EpisodeStep(
+                state,
+                np.tanh(latent_action).astype(np.float32),
+                1.0,
+                policy_action=latent_action,
+            ),
+        ),
+        final_state=observation(0.0),
+        terminated=True,
+        truncated=False,
+    )
+
+    loss = agent.update(episode)
+
+    assert np.isfinite(loss)
+    assert actor_model.mean_network[0](torch.as_tensor(state)).item() > 0.0
+
+
+def test_continuous_reinforce_samples_bounded_and_latent_actions() -> None:
+    actor_model = GaussianPolicyNetwork(1, 1, hidden_sizes=())
+    agent = Reinforce(
+        actor_model,
+        torch.optim.SGD(actor_model.parameters(), lr=0.1),
+        action_low=[-2.0],
+        action_high=[2.0],
+    )
+
+    environment_action, policy_action = agent.sample_action(observation(0.0))
+
+    assert isinstance(environment_action, np.ndarray)
+    assert isinstance(policy_action, np.ndarray)
+    assert environment_action.shape == policy_action.shape == (1,)
+    assert -2.0 <= environment_action[0] <= 2.0
 
 
 def test_reinforce_uses_reward_to_go_and_outer_discount() -> None:

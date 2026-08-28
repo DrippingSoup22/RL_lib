@@ -52,7 +52,11 @@ from experiments.policy_gradient.runners.reinforce import (
     train_episode as train_reinforce_episode,
 )
 from rl_lib.algorithms.policy_gradient import A2C, PPO, Reinforce, ReinforceWithBaseline
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
 
 DIAGNOSTIC_FIELDS = (
     "algorithm",
@@ -129,18 +133,30 @@ def make_agent(
         raise ValueError(f"algorithm must be one of {ALGORITHMS}")
     if not isinstance(env.observation_space, gym.spaces.Box):
         raise ValueError("environment must have a Box observation space")
-    if not isinstance(env.action_space, gym.spaces.Discrete):
-        raise ValueError("environment must have a Discrete action space")
 
     observation_size = int(np.prod(env.observation_space.shape))
-    number_of_actions = int(env.action_space.n)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        actor_model = DiscretePolicyNetwork(
-            observation_size,
-            number_of_actions,
-            hidden_sizes,
-        )
+        if isinstance(env.action_space, gym.spaces.Discrete):
+            actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork = (
+                DiscretePolicyNetwork(
+                    observation_size,
+                    int(env.action_space.n),
+                    hidden_sizes,
+                )
+            )
+            action_low = action_high = None
+        elif isinstance(env.action_space, gym.spaces.Box):
+            actor_model = GaussianPolicyNetwork(
+                observation_size,
+                int(np.prod(env.action_space.shape)),
+                hidden_sizes,
+            )
+            action_low = env.action_space.low
+            action_high = env.action_space.high
+        else:
+            raise ValueError("environment must have a Discrete or Box action space")
+
         actor_optimizer = make_optimizer(
             optimizer_name,
             actor_model.parameters(),
@@ -148,7 +164,13 @@ def make_agent(
             weight_decay,
         )
         if algorithm == "reinforce":
-            return Reinforce(actor_model, actor_optimizer, discount)
+            return Reinforce(
+                actor_model,
+                actor_optimizer,
+                discount,
+                action_low=action_low,
+                action_high=action_high,
+            )
 
         critic_model = StateValueNetwork(observation_size, hidden_sizes)
         critic_optimizer = make_optimizer(
@@ -164,6 +186,8 @@ def make_agent(
                 critic_model,
                 critic_optimizer,
                 discount,
+                action_low=action_low,
+                action_high=action_high,
             )
         if algorithm == "ppo":
             return PPO(
@@ -174,6 +198,8 @@ def make_agent(
                 clip_ratio=ppo_clip_ratio,
                 entropy_coefficient=entropy_coefficient,
                 seed=seed,
+                action_low=action_low,
+                action_high=action_high,
             )
         if algorithm not in ("a2c", "a3c"):
             raise ValueError(f"algorithm must be one of {ALGORITHMS}")
@@ -186,6 +212,8 @@ def make_agent(
             critic_optimizer,
             discount,
             entropy_coefficient,
+            action_low=action_low,
+            action_high=action_high,
         )
 
 

@@ -7,7 +7,11 @@ from numpy.typing import NDArray
 
 from rl_lib.algorithms.policy_gradient.a3c import A3C
 from rl_lib.data import EpisodeStep
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
 
 Observation = NDArray[np.float32]
 
@@ -91,6 +95,54 @@ def test_a3c_applies_local_gradients_to_shared_models_and_resynchronizes() -> No
     assert critic_loss == pytest.approx(0.5)
     assert probability_after > probability_before
     assert shared_value == pytest.approx(0.2)
+    assert_models_equal(agent.actor_model, agent.shared_actor_model)
+    assert_models_equal(agent.critic_model, agent.shared_critic_model)
+
+
+def test_continuous_a3c_applies_gradients_from_stored_latent_action() -> None:
+    actor_model = GaussianPolicyNetwork(1, 1, hidden_sizes=(), initial_std=0.5)
+    shared_actor_model = GaussianPolicyNetwork(
+        1,
+        1,
+        hidden_sizes=(),
+        initial_std=0.5,
+    )
+    critic_model = StateValueNetwork(1, hidden_sizes=())
+    shared_critic_model = StateValueNetwork(1, hidden_sizes=())
+    fill_model(actor_model, 0.0)
+    fill_model(shared_actor_model, 0.0)
+    fill_model(critic_model, 0.0)
+    fill_model(shared_critic_model, 0.0)
+    agent = A3C(
+        actor_model,
+        shared_actor_model,
+        torch.optim.SGD(shared_actor_model.parameters(), lr=0.1),
+        critic_model,
+        shared_critic_model,
+        torch.optim.SGD(shared_critic_model.parameters(), lr=0.1),
+        Lock(),
+        action_low=[-1.0],
+        action_high=[1.0],
+    )
+    latent_action = np.asarray([0.5], dtype=np.float32)
+
+    actor_loss, critic_loss = agent.update(
+        (
+            EpisodeStep(
+                observation(1.0),
+                np.tanh(latent_action).astype(np.float32),
+                1.0,
+                policy_action=latent_action,
+            ),
+        ),
+        observation(0.0),
+        terminated=True,
+    )
+
+    assert np.isfinite(actor_loss)
+    assert critic_loss == pytest.approx(0.5)
+    assert shared_actor_model.mean_network[0](torch.tensor([1.0])).item() > 0.0
+    assert shared_critic_model(torch.tensor([1.0])).item() == pytest.approx(0.2)
     assert_models_equal(agent.actor_model, agent.shared_actor_model)
     assert_models_equal(agent.critic_model, agent.shared_critic_model)
 

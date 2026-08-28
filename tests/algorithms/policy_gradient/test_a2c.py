@@ -7,7 +7,11 @@ from numpy.typing import NDArray
 
 from rl_lib.algorithms.policy_gradient import A2C
 from rl_lib.data import EpisodeStep
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
 
 Observation = NDArray[np.float32]
 
@@ -73,6 +77,44 @@ def test_a2c_updates_actor_and_critic_from_a_positive_advantage() -> None:
     assert critic_loss == pytest.approx(0.5)
     assert probability_after > probability_before
     assert value_after == pytest.approx(0.2)
+
+
+def test_continuous_a2c_updates_from_stored_latent_action() -> None:
+    actor_model = GaussianPolicyNetwork(1, 1, hidden_sizes=(), initial_std=0.5)
+    critic_model = StateValueNetwork(1, hidden_sizes=())
+    with torch.no_grad():
+        actor_model.mean_network[0].weight.zero_()
+        actor_model.mean_network[0].bias.zero_()
+        critic_model.network[0].weight.zero_()
+        critic_model.network[0].bias.zero_()
+    agent = A2C(
+        actor_model,
+        torch.optim.SGD(actor_model.parameters(), lr=0.1),
+        critic_model,
+        torch.optim.SGD(critic_model.parameters(), lr=0.1),
+        action_low=[-1.0],
+        action_high=[1.0],
+    )
+    latent_action = np.asarray([0.5], dtype=np.float32)
+    steps = (
+        EpisodeStep(
+            observation(1.0),
+            np.tanh(latent_action).astype(np.float32),
+            1.0,
+            policy_action=latent_action,
+        ),
+    )
+
+    actor_loss, critic_loss = agent.update(
+        steps,
+        observation(0.0),
+        terminated=True,
+    )
+
+    assert np.isfinite(actor_loss)
+    assert critic_loss == pytest.approx(0.5)
+    assert actor_model.mean_network[0](torch.tensor([1.0])).item() > 0.0
+    assert agent.critic_model(torch.tensor([1.0])).item() == pytest.approx(0.2)
 
 
 def test_a2c_uses_n_step_return_targets() -> None:

@@ -39,13 +39,22 @@ def train_episode(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(action_seed)
         while not (terminated or truncated):
-            action = agent.select_action(state)
+            action, policy_action = agent.sample_action(state)
             next_observation, reward, terminated, truncated, _ = env.step(action)
             next_state = observation_array(
                 next_observation,
                 agent.actor_model.observation_size,
             )
-            rollout.append(EpisodeStep(state, action, float(reward)))
+            # Keep the bounded action for the environment record and the latent
+            # action used to reevaluate a continuous policy during the update.
+            rollout.append(
+                EpisodeStep(
+                    state,
+                    action,
+                    float(reward),
+                    policy_action=policy_action,
+                )
+            )
             episode_return += float(reward)
             episode_length += 1
             state = next_state

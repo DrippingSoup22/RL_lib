@@ -400,7 +400,10 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
     """Build complete reproducibility metadata before training begins."""
     inspection_env = make_environment(config.environment)
     assert isinstance(inspection_env.observation_space, gym.spaces.Box)
-    assert isinstance(inspection_env.action_space, gym.spaces.Discrete)
+    assert isinstance(
+        inspection_env.action_space,
+        (gym.spaces.Discrete, gym.spaces.Box),
+    )
     max_episode_steps = (
         inspection_env.spec.max_episode_steps
         if inspection_env.spec is not None
@@ -409,7 +412,20 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
     observation_shape = list(inspection_env.observation_space.shape)
     observation_low = _serialized_bounds(inspection_env.observation_space.low)
     observation_high = _serialized_bounds(inspection_env.observation_space.high)
-    number_of_actions = int(inspection_env.action_space.n)
+    if isinstance(inspection_env.action_space, gym.spaces.Discrete):
+        action_space_type = "categorical"
+        number_of_actions: int | None = int(inspection_env.action_space.n)
+        action_shape: list[int] | None = None
+        action_low: list[float] | None = None
+        action_high: list[float] | None = None
+        evaluation_policy = "frozen stochastic categorical actor"
+    else:
+        action_space_type = "bounded continuous"
+        number_of_actions = None
+        action_shape = list(inspection_env.action_space.shape)
+        action_low = [float(value) for value in inspection_env.action_space.low]
+        action_high = [float(value) for value in inspection_env.action_space.high]
+        evaluation_policy = "frozen stochastic tanh-squashed Gaussian actor"
     inspection_env.close()
 
     metadata = asdict(config)
@@ -422,7 +438,11 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
             "observation_low": observation_low,
             "observation_high": observation_high,
             "observation_processing": "convert to float32 and flatten; no scaling",
+            "action_space_type": action_space_type,
             "number_of_actions": number_of_actions,
+            "action_shape": action_shape,
+            "action_low": action_low,
+            "action_high": action_high,
             "max_episode_steps": max_episode_steps,
             "training_environment_seed": "seed * training_episodes + episode",
             "training_action_seed": "10000000 + seed * training_episodes + episode",
@@ -443,7 +463,7 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
                 if config.recording_checkpoints
                 else None
             ),
-            "evaluation_policy": "frozen stochastic categorical actor",
+            "evaluation_policy": evaluation_policy,
             "success_definition": success_definition(config.environment),
             "episode_stopping": "termination or truncation",
             "truncation_target": (

@@ -2,10 +2,23 @@
 
 from dataclasses import dataclass
 
+import numpy as np
+from numpy.typing import NDArray
+
 
 @dataclass(frozen=True)
-class PPOActionSample:
-    """Action and frozen behavior-policy measurements collected for PPO."""
+class ContinuousPPOActionSample:
+    """Bounded action and frozen measurements collected by continuous PPO."""
+
+    action: NDArray[np.float32]
+    latent_action: NDArray[np.float32]
+    log_probability: float
+    value: float
+
+
+@dataclass(frozen=True)
+class CategoricalPPOActionSample:
+    """Categorical action and frozen behavior measurements collected by PPO."""
 
     action: int
     log_probability: float

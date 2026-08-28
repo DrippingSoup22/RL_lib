@@ -11,11 +11,14 @@ StateT = TypeVar("StateT")
 
 @dataclass(frozen=True)
 class EpisodeStep(Generic[StateT]):
-    """One state, action, and resulting reward from an episode."""
+    """One state, environment action, and resulting reward from an episode."""
 
     state: StateT
-    action: int
+    action: int | NDArray[np.float32]
     reward: float
+    # Continuous policies retain their unsquashed action for stable reevaluation.
+    # Categorical rollouts may omit this because both action forms are identical.
+    policy_action: int | NDArray[np.float32] | None = None
 
 
 @dataclass(frozen=True)

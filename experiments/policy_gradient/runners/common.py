@@ -59,9 +59,22 @@ def generate_episode(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(action_seed)
         while not (terminated or truncated):
-            action = agent.select_action(state)
+            if isinstance(agent, PPO):
+                # PPO has a separate frozen-batch collector; this shared path is
+                # used only for its evaluation episodes.
+                action = agent.select_action(state)
+                policy_action = None
+            else:
+                action, policy_action = agent.sample_action(state)
             next_observation, reward, terminated, truncated, _ = env.step(action)
-            steps.append(EpisodeStep(state, action, float(reward)))
+            steps.append(
+                EpisodeStep(
+                    state,
+                    action,
+                    float(reward),
+                    policy_action=policy_action,
+                )
+            )
             state = observation_array(
                 next_observation,
                 agent.actor_model.observation_size,
@@ -79,11 +92,10 @@ def mean_policy_entropy(
     agent: PolicyAgent,
     steps: Sequence[EpisodeStep[Observation]],
 ) -> float:
-    """Measure categorical-policy entropy on rollout observations."""
+    """Measure the current policy's entropy on rollout observations."""
     observations = torch.as_tensor(
         np.asarray([step.state for step in steps], dtype=np.float32)
     )
     with torch.no_grad():
-        logits = agent.actor_model(observations)
-        entropy = torch.distributions.Categorical(logits=logits).entropy().mean()
+        entropy = agent.policy.entropy(observations).mean()
     return float(entropy.item())

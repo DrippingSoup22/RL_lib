@@ -5,13 +5,14 @@ from dataclasses import dataclass
 import gymnasium as gym
 import numpy as np
 import torch
+from numpy.typing import NDArray
 
 from experiments.policy_gradient.runners.common import Observation, observation_array
 from rl_lib.algorithms.policy_gradient import (
     PPO,
     generalized_advantage_estimates,
 )
-from rl_lib.data import PPOUpdateResult
+from rl_lib.data import ContinuousPPOActionSample, PPOUpdateResult
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,7 @@ def train_episodes(
         raise ValueError("Environment and action seeds must have the same length")
 
     batch_observations: list[Observation] = []
-    batch_actions: list[int] = []
+    batch_policy_actions: list[int | NDArray[np.float32]] = []
     batch_old_log_probabilities: list[float] = []
     batch_advantages: list[float] = []
     batch_return_targets: list[float] = []
@@ -75,7 +76,14 @@ def train_episodes(
                 )
 
                 batch_observations.append(state)
-                batch_actions.append(sample.action)
+                # Categorical actions are reevaluated directly. Continuous PPO
+                # instead stores the raw Gaussian sample, while only its bounded
+                # transformation is sent to the environment above.
+                batch_policy_actions.append(
+                    sample.latent_action
+                    if isinstance(sample, ContinuousPPOActionSample)
+                    else sample.action
+                )
                 batch_old_log_probabilities.append(sample.log_probability)
                 episode_rewards.append(float(reward))
                 episode_values.append(sample.value)
@@ -113,7 +121,7 @@ def train_episodes(
 
     minibatch_updates = agent.update(
         np.asarray(batch_observations, dtype=np.float32),
-        np.asarray(batch_actions, dtype=np.int64),
+        np.asarray(batch_policy_actions),
         np.asarray(batch_old_log_probabilities, dtype=np.float32),
         np.asarray(batch_advantages, dtype=np.float32),
         np.asarray(batch_return_targets, dtype=np.float32),

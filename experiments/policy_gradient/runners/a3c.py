@@ -22,7 +22,11 @@ from experiments.policy_gradient.runners.common import (
 )
 from rl_lib.algorithms.policy_gradient import A3C
 from rl_lib.data import EpisodeStep
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
 from rl_lib.optimizers import share_optimizer_state
 
 
@@ -115,13 +119,22 @@ def _train_episode(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(action_seed)
         while not (terminated or truncated):
-            action = agent.select_action(state)
+            action, policy_action = agent.sample_action(state)
             next_observation, reward, terminated, truncated, _ = env.step(action)
             next_state = observation_array(
                 next_observation,
                 agent.actor_model.observation_size,
             )
-            rollout.append(EpisodeStep(state, action, float(reward)))
+            # Each worker interacts with the bounded action but differentiates
+            # the corresponding unsquashed policy action during its update.
+            rollout.append(
+                EpisodeStep(
+                    state,
+                    action,
+                    float(reward),
+                    policy_action=policy_action,
+                )
+            )
             episode_return += float(reward)
             episode_length += 1
             state = next_state
@@ -161,7 +174,7 @@ def _train_episode(
 def _worker(
     worker: int,
     config: _WorkerConfig,
-    shared_actor_model: DiscretePolicyNetwork,
+    shared_actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
     shared_actor_optimizer: torch.optim.Optimizer,
     shared_critic_model: StateValueNetwork,
     shared_critic_optimizer: torch.optim.Optimizer,
@@ -180,14 +193,30 @@ def _worker(
         )
         if not isinstance(env.observation_space, gym.spaces.Box):
             raise ValueError("A3C environment must have a Box observation space")
-        if not isinstance(env.action_space, gym.spaces.Discrete):
-            raise ValueError("A3C environment must have a Discrete action space")
-
-        actor_model = DiscretePolicyNetwork(
-            shared_actor_model.observation_size,
-            shared_actor_model.number_of_actions,
-            shared_actor_model.hidden_sizes,
-        )
+        if isinstance(shared_actor_model, DiscretePolicyNetwork):
+            if not isinstance(env.action_space, gym.spaces.Discrete):
+                raise ValueError("Categorical A3C requires a Discrete action space")
+            action_low = action_high = None
+            actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork = (
+                DiscretePolicyNetwork(
+                    shared_actor_model.observation_size,
+                    shared_actor_model.number_of_actions,
+                    shared_actor_model.hidden_sizes,
+                )
+            )
+        elif isinstance(shared_actor_model, GaussianPolicyNetwork):
+            if not isinstance(env.action_space, gym.spaces.Box):
+                raise ValueError("Continuous A3C requires a Box action space")
+            # The local environment owns the bounds used to transform actions.
+            action_low = env.action_space.low
+            action_high = env.action_space.high
+            actor_model = GaussianPolicyNetwork(
+                shared_actor_model.observation_size,
+                shared_actor_model.action_size,
+                shared_actor_model.hidden_sizes,
+            )
+        else:
+            raise TypeError("Shared actor must be discrete or Gaussian")
         critic_model = StateValueNetwork(
             shared_critic_model.observation_size,
             shared_critic_model.hidden_sizes,
@@ -202,6 +231,8 @@ def _worker(
             update_lock,
             config.discount,
             config.entropy_coefficient,
+            action_low=action_low,
+            action_high=action_high,
         )
 
         while True:
@@ -278,7 +309,7 @@ def _validate_training_request(
 
 def train_episodes(
     environment: str,
-    shared_actor_model: DiscretePolicyNetwork,
+    shared_actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
     shared_actor_optimizer: torch.optim.Optimizer,
     shared_critic_model: StateValueNetwork,
     shared_critic_optimizer: torch.optim.Optimizer,

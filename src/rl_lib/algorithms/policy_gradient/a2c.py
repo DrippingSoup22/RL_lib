@@ -1,4 +1,4 @@
-"""Synchronous advantage actor-critic for discrete actions."""
+"""Synchronous advantage actor-critic."""
 
 from collections.abc import Sequence
 
@@ -7,18 +7,28 @@ import torch
 from numpy.typing import ArrayLike, NDArray
 
 from rl_lib.data import EpisodeStep, rollout_arrays
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
+from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
 class A2C:
+    """Synchronous actor-critic for categorical or continuous actions."""
+
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork,
+        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
         critic_model: StateValueNetwork,
         critic_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         entropy_coefficient: float = 0.0,
+        *,
+        action_low: ArrayLike | None = None,
+        action_high: ArrayLike | None = None,
     ) -> None:
 
         if not actor_model.observation_size == critic_model.observation_size:
@@ -34,30 +44,70 @@ class A2C:
         self.critic_optimizer = critic_optimizer
         self.discount = discount
         self.entropy_coefficient = entropy_coefficient
+        self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
-    def select_action(self, observation: ArrayLike) -> int:
+        if isinstance(actor_model, DiscretePolicyNetwork):
+            if action_low is not None or action_high is not None:
+                raise ValueError("Categorical A2C must not receive action bounds")
+            self.policy = CategoricalPolicy(actor_model)
+        elif isinstance(actor_model, GaussianPolicyNetwork):
+            if action_low is None or action_high is None:
+                raise ValueError("Continuous A2C requires both action bounds")
+            self.policy = SquashedGaussianPolicy(actor_model, action_low, action_high)
+        else:
+            raise TypeError("Actor model must be discrete or Gaussian")
+
+    def sample_action(
+        self,
+        observation: ArrayLike,
+    ) -> tuple[int, int] | tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """Return environment and policy actions from one policy sample."""
         observation_tensor = torch.as_tensor(
             observation,
             dtype=torch.float32,
         )
 
         with torch.no_grad():
-            logits = self.actor_model(observation_tensor)
-            distribution = torch.distributions.Categorical(logits=logits)
-            action = distribution.sample()
-        return int(action.item())
+            if isinstance(self.policy, CategoricalPolicy):
+                action, _ = self.policy.sample(observation_tensor)
+                action_index = int(action.item())
+                return action_index, action_index
+
+            # Store the latent action for the actor update while interacting
+            # with the environment through the bounded transformation.
+            environment_action, latent_action, _ = self.policy.sample(
+                observation_tensor
+            )
+            return (
+                environment_action.cpu().numpy().astype(np.float32, copy=True),
+                latent_action.cpu().numpy().astype(np.float32, copy=True),
+            )
+
+    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
+        environment_action, _ = self.sample_action(observation)
+        return environment_action
 
     def _rollout_tensors(
         self,
         steps: Sequence[EpisodeStep[NDArray[np.float32]]],
         final_state: ArrayLike,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        arrays = rollout_arrays(
-            steps,
-            final_state,
-            observation_size=self.actor_model.observation_size,
-            number_of_actions=self.actor_model.number_of_actions,
-        )
+        # Reevaluate the representation sampled by the policy: an action index
+        # for categorical control or a latent vector for continuous control.
+        if isinstance(self.policy, CategoricalPolicy):
+            arrays = rollout_arrays(
+                steps,
+                final_state,
+                observation_size=self.actor_model.observation_size,
+                number_of_actions=self.policy.model.number_of_actions,
+            )
+        else:
+            arrays = rollout_arrays(
+                steps,
+                final_state,
+                observation_size=self.actor_model.observation_size,
+                action_size=self.policy.model.action_size,
+            )
         return (
             torch.as_tensor(arrays.observations),
             torch.as_tensor(arrays.actions),
@@ -73,12 +123,17 @@ class A2C:
         terminated: bool,
     ) -> tuple[float, float]:
 
-        observations_tensor, actions_tensor, rewards_tensor, final_state_tensor = (
-            self._rollout_tensors(steps, final_state)
-        )
+        (
+            observations_tensor,
+            policy_actions_tensor,
+            rewards_tensor,
+            final_state_tensor,
+        ) = self._rollout_tensors(steps, final_state)
 
         returns = torch.empty_like(rewards_tensor)
         with torch.no_grad():
+            # True termination has no future value. Any nonterminal rollout
+            # bootstraps from the critic at the state following its last step.
             if terminated:
                 running_return = rewards_tensor.new_zeros(())
             else:
@@ -88,14 +143,16 @@ class A2C:
                 running_return = rewards_tensor[index] + self.discount * running_return
                 returns[index] = running_return
 
-        logits = self.actor_model(observations_tensor)
-        distribution = torch.distributions.Categorical(logits=logits)
-        log_probabilities = distribution.log_prob(actions_tensor)
-        entropy = distribution.entropy()
+        log_probabilities, entropy = self.policy.evaluate_actions(
+            observations_tensor,
+            policy_actions_tensor,
+        )
 
         values = self.critic_model(observations_tensor)
         advantages = returns - values
 
+        # The actor treats the advantage as a fixed learning signal; the critic
+        # learns the same error through its separate squared-loss update.
         actor_loss = -(log_probabilities * advantages.detach()).mean()
         actor_loss -= self.entropy_coefficient * entropy.mean()
 

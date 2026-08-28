@@ -11,6 +11,8 @@ from experiments.policy_gradient.run import (
 )
 from experiments.policy_gradient.runners.a2c import train_episode as train_a2c_episode
 from rl_lib.algorithms.policy_gradient import A2C, PPO
+from rl_lib.models import GaussianPolicyNetwork
+from rl_lib.policies import SquashedGaussianPolicy
 
 
 def test_learning_rate_warms_up_then_cosine_decays_to_minimum() -> None:
@@ -153,6 +155,54 @@ def test_make_agent_builds_configured_ppo() -> None:
     env.close()
 
 
+def test_make_agent_builds_continuous_ppo_from_box_action_space() -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=1)
+    agent = make_agent(
+        "ppo",
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.002,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.01,
+        hidden_sizes=(4,),
+        seed=0,
+        ppo_clip_ratio=0.1,
+    )
+
+    assert isinstance(agent.actor_model, GaussianPolicyNetwork)
+    assert isinstance(agent.policy, SquashedGaussianPolicy)
+    assert agent.actor_model.action_size == 1
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ("reinforce", "reinforce_with_baseline", "a2c", "a3c", "ppo"),
+)
+def test_make_agent_builds_continuous_policy_for_every_algorithm(
+    algorithm: str,
+) -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=1)
+    agent = make_agent(
+        algorithm,
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.002,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.01,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+
+    assert isinstance(agent.actor_model, GaussianPolicyNetwork)
+    assert isinstance(agent.policy, SquashedGaussianPolicy)
+    env.close()
+
+
 def test_policy_gradient_seed_base_resolves_visible_trial_values() -> None:
     config = parse_config(
         (
@@ -204,6 +254,41 @@ def test_a2c_training_updates_at_rollout_boundaries_and_truncation() -> None:
     assert result.critic_loss is not None
     assert math.isfinite(result.actor_loss)
     assert math.isfinite(result.critic_loss)
+    assert result.policy_entropy is not None
+    assert math.isfinite(result.policy_entropy)
+    env.close()
+
+
+def test_continuous_a2c_training_updates_at_rollout_boundaries() -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=3)
+    agent = make_agent(
+        "a2c",
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.001,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.0,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    assert isinstance(agent, A2C)
+
+    result = train_a2c_episode(
+        env,
+        agent,
+        rollout_steps=2,
+        environment_seed=0,
+        action_seed=0,
+        collect_diagnostics=True,
+    )
+
+    assert result.episode_length == 3
+    assert result.truncated
+    assert result.updates == 2
+    assert math.isfinite(result.actor_loss)
+    assert result.critic_loss is not None and math.isfinite(result.critic_loss)
     assert result.policy_entropy is not None
     assert math.isfinite(result.policy_entropy)
     env.close()

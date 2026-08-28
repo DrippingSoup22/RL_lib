@@ -1,25 +1,37 @@
-"""Clipped proximal policy optimization for discrete actions."""
+"""Clipped proximal policy optimization."""
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import PPOActionSample, PPOUpdateResult
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.data import (
+    CategoricalPPOActionSample,
+    ContinuousPPOActionSample,
+    PPOUpdateResult,
+)
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
+from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
 class PPO:
-    """A discrete-action PPO actor and state-value critic."""
+    """PPO actor and critic for categorical or bounded continuous actions."""
 
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork,
+        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
         critic_model: StateValueNetwork,
         critic_optimizer: torch.optim.Optimizer,
         clip_ratio: float = 0.2,
         entropy_coefficient: float = 0.0,
         seed: int | None = None,
+        *,
+        action_low: ArrayLike | None = None,
+        action_high: ArrayLike | None = None,
     ) -> None:
 
         if not actor_model.observation_size == critic_model.observation_size:
@@ -36,32 +48,63 @@ class PPO:
         self.clip_ratio = clip_ratio
         self.entropy_coefficient = entropy_coefficient
         self.rng = np.random.default_rng(seed)
+        self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
-    def sample_action(self, observation: ArrayLike) -> PPOActionSample:
-        """Sample once and retain the behavior policy measurements PPO will freeze."""
+        if isinstance(actor_model, DiscretePolicyNetwork):
+            if action_low is not None or action_high is not None:
+                raise ValueError(
+                    "Categorical PPO must not receive continuous action bounds"
+                )
+            self.policy = CategoricalPolicy(actor_model)
+
+        elif isinstance(actor_model, GaussianPolicyNetwork):
+            if action_low is None or action_high is None:
+                raise ValueError(
+                    "Continuous PPO requires lower and upper action bounds"
+                )
+            self.policy = SquashedGaussianPolicy(actor_model, action_low, action_high)
+
+        else:
+            raise TypeError("Actor model must be discrete or Gaussian")
+
+    def sample_action(
+        self, observation: ArrayLike
+    ) -> CategoricalPPOActionSample | ContinuousPPOActionSample:
+        """Sample once and freeze the behavior-policy measurements."""
+
         observation_tensor = self._observation_tensor(observation)
-
         with torch.no_grad():
-            logits = self.actor_model(observation_tensor)
-            distribution = torch.distributions.Categorical(logits=logits)
-            action = distribution.sample()
-            log_probability = distribution.log_prob(action)
-
             value = self.critic_model(observation_tensor)
 
-        return PPOActionSample(
-            int(action.item()), float(log_probability.item()), float(value.item())
-        )
+            if isinstance(self.policy, CategoricalPolicy):
+                action, log_probability = self.policy.sample(observation_tensor)
 
-    def select_action(self, observation: ArrayLike) -> int:
+                return CategoricalPPOActionSample(
+                    action=int(action.item()),
+                    log_probability=float(log_probability.item()),
+                    value=float(value.item()),
+                )
 
+            environment_action, latent_action, log_probability = self.policy.sample(
+                observation_tensor
+            )
+            return ContinuousPPOActionSample(
+                action=environment_action.cpu().numpy().astype(np.float32, copy=True),
+                latent_action=latent_action.cpu().numpy().astype(np.float32, copy=True),
+                log_probability=float(log_probability.item()),
+                value=float(value.item()),
+            )
+
+    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
         observation_tensor = self._observation_tensor(observation)
 
         with torch.no_grad():
-            logits = self.actor_model(observation_tensor)
-            distribution = torch.distributions.Categorical(logits=logits)
-            action = distribution.sample()
-        return int(action.item())
+            if isinstance(self.policy, CategoricalPolicy):
+                action, _ = self.policy.sample(observation_tensor)
+                return int(action.item())
+
+            environment_action, _, _ = self.policy.sample(observation_tensor)
+            return environment_action.cpu().numpy().astype(np.float32, copy=True)
 
     def state_value(self, observation: ArrayLike) -> float:
         observation_tensor = self._observation_tensor(observation)
@@ -159,9 +202,10 @@ class PPO:
         )
 
         # Re-evaluate the collected actions under the current, changing policy.
-        logits = self.actor_model(observations_tensor)
-        distribution = torch.distributions.Categorical(logits=logits)
-        new_log_probabilities = distribution.log_prob(actions_tensor)
+        new_log_probabilities, entropy_values = self.policy.evaluate_actions(
+            observations_tensor,
+            actions_tensor,
+        )
 
         probability_ratios = torch.exp(
             new_log_probabilities - old_log_probabilities_tensor
@@ -181,7 +225,7 @@ class PPO:
             clipped_objectives,
         )
 
-        entropy = distribution.entropy().mean()
+        entropy = entropy_values.mean()
         actor_loss = -surrogate_objectives.mean() - self.entropy_coefficient * entropy
 
         # Return targets were calculated before optimization and remain fixed.
@@ -216,7 +260,6 @@ class PPO:
         torch.Tensor,
     ]:
         observations_array = np.asarray(observations, dtype=np.float32)
-        actions_array = np.asarray(actions)
         old_log_probabilities_array = np.asarray(
             old_log_probabilities,
             dtype=np.float32,
@@ -238,15 +281,32 @@ class PPO:
         if not np.all(np.isfinite(observations_array)):
             raise ValueError("All observation values must be finite")
 
-        if actions_array.shape != (batch_size,):
-            raise ValueError("Actions must contain one value per observation")
-        # Validate before int64 conversion, which would silently truncate floats.
-        if not np.issubdtype(actions_array.dtype, np.integer):
-            raise ValueError("Actions must be integers")
-        if np.any(
-            (actions_array < 0) | (actions_array >= self.actor_model.number_of_actions)
-        ):
-            raise ValueError("Actions must stay inside the action space")
+        if isinstance(self.policy, CategoricalPolicy):
+            actions_array = np.asarray(actions)
+            if actions_array.shape != (batch_size,):
+                raise ValueError("Actions must contain one value per observation")
+            # Validate before int64 conversion, which would truncate floats.
+            if not np.issubdtype(actions_array.dtype, np.integer):
+                raise ValueError("Actions must be integers")
+            if np.any(
+                (actions_array < 0)
+                | (actions_array >= self.policy.model.number_of_actions)
+            ):
+                raise ValueError("Actions must stay inside the action space")
+            actions_tensor = torch.as_tensor(actions_array, dtype=torch.int64)
+        else:
+            try:
+                actions_array = np.asarray(actions, dtype=np.float32)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Latent actions must be numeric") from error
+            expected_action_shape = (batch_size, self.policy.model.action_size)
+            if actions_array.shape != expected_action_shape:
+                raise ValueError(
+                    f"Latent actions must have shape {expected_action_shape}"
+                )
+            if not np.all(np.isfinite(actions_array)):
+                raise ValueError("All latent action values must be finite")
+            actions_tensor = torch.as_tensor(actions_array, dtype=torch.float32)
 
         vector_fields = (
             ("Old log-probabilities", old_log_probabilities_array),
@@ -261,7 +321,7 @@ class PPO:
 
         return (
             torch.as_tensor(observations_array, dtype=torch.float32),
-            torch.as_tensor(actions_array, dtype=torch.int64),
+            actions_tensor,
             torch.as_tensor(old_log_probabilities_array, dtype=torch.float32),
             torch.as_tensor(advantages_array, dtype=torch.float32),
             torch.as_tensor(return_targets_array, dtype=torch.float32),

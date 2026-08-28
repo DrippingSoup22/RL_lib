@@ -199,6 +199,18 @@ def test_policy_gradient_accepts_discrete_classic_control_environments(
     env.close()
 
 
+def test_policy_gradient_accepts_bounded_continuous_environment() -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=1)
+    observation, _ = env.reset(seed=0)
+    transition = env.step(env.action_space.sample())
+
+    assert isinstance(env.action_space, gym.spaces.Box)
+    assert env.action_space.shape == (1,)
+    assert env.observation_space.contains(observation)
+    assert len(transition) == 5
+    env.close()
+
+
 @pytest.mark.parametrize(
     ("environment", "shape", "active"),
     (
@@ -333,6 +345,52 @@ def test_policy_gradient_agents_interact_with_gymnasium(algorithm: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "algorithm",
+    ("reinforce", "reinforce_with_baseline", "a2c"),
+)
+def test_policy_gradient_agents_interact_with_continuous_actions(
+    algorithm: str,
+) -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=1)
+    agent = make_agent(
+        algorithm,
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.001,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.0,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    episode = generate_policy_gradient_episode(
+        env,
+        agent,
+        environment_seed=0,
+        action_seed=0,
+    )
+
+    if isinstance(agent, A2C):
+        losses = agent.update(
+            episode.steps,
+            episode.final_state,
+            terminated=episode.terminated,
+        )
+    else:
+        losses = (agent.update(episode),)
+
+    assert episode.truncated
+    assert len(episode.steps) == 1
+    assert episode.steps[0].policy_action is not None
+    assert np.all(np.isfinite(losses))
+    assert all(
+        torch.isfinite(parameter).all() for parameter in agent.actor_model.parameters()
+    )
+    env.close()
+
+
+@pytest.mark.parametrize(
     "environment",
     (
         "Acrobot-v1",
@@ -376,6 +434,48 @@ def test_ppo_interacts_with_every_discrete_policy_gradient_environment(
     assert len(result.episodes) == 1
     assert result.episodes[0].episode_length == 1
     assert result.episodes[0].terminated or result.episodes[0].truncated
+    assert len(result.minibatch_updates) == 1
+    assert all(
+        math.isfinite(value)
+        for value in (
+            result.minibatch_updates[0].actor_loss,
+            result.minibatch_updates[0].critic_loss,
+            result.minibatch_updates[0].entropy,
+        )
+    )
+    env.close()
+
+
+def test_ppo_interacts_with_continuous_policy_gradient_environment() -> None:
+    env = make_environment("MountainCarContinuous-v0", max_episode_steps=1)
+    agent = make_agent(
+        "ppo",
+        env,
+        actor_learning_rate=0.001,
+        critic_learning_rate=0.001,
+        optimizer_name="adam",
+        weight_decay=0.0,
+        discount=0.99,
+        entropy_coefficient=0.0,
+        hidden_sizes=(4,),
+        seed=0,
+    )
+    assert isinstance(agent, PPO)
+
+    result = train_ppo_episodes(
+        env,
+        agent,
+        environment_seeds=(0,),
+        action_seeds=(0,),
+        discount=0.99,
+        gae_lambda=0.95,
+        update_epochs=1,
+        minibatch_size=4,
+    )
+
+    assert len(result.episodes) == 1
+    assert result.episodes[0].episode_length == 1
+    assert result.episodes[0].truncated
     assert len(result.minibatch_updates) == 1
     assert all(
         math.isfinite(value)

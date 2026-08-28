@@ -97,6 +97,8 @@ class GaussianPolicyNetwork(nn.Module):
         observation: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mean = self.mean_network(observation)
+        # Bounding log standard deviation prevents numerical overflow or a
+        # nearly deterministic zero-variance Normal distribution.
         log_standard_deviation = torch.clamp(
             self.log_std_network(observation),
             min=-20.0,

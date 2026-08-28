@@ -1,4 +1,4 @@
-"""Asynchronous advantage actor-critic for discrete actions."""
+"""Asynchronous advantage actor-critic."""
 
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
@@ -9,7 +9,12 @@ import torch.nn as nn
 from numpy.typing import ArrayLike, NDArray
 
 from rl_lib.data import EpisodeStep, rollout_arrays
-from rl_lib.models import DiscretePolicyNetwork, StateValueNetwork
+from rl_lib.models import (
+    DiscretePolicyNetwork,
+    GaussianPolicyNetwork,
+    StateValueNetwork,
+)
+from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
 def _validate_model_pair(
@@ -49,10 +54,12 @@ def _copy_gradients(local_model: nn.Module, shared_model: nn.Module) -> None:
 
 
 class A3C:
+    """Local A3C worker backed by shared categorical or continuous models."""
+
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork,
-        shared_actor_model: DiscretePolicyNetwork,
+        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+        shared_actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
         shared_actor_optimizer: torch.optim.Optimizer,
         critic_model: StateValueNetwork,
         shared_critic_model: StateValueNetwork,
@@ -60,6 +67,9 @@ class A3C:
         update_lock: AbstractContextManager[object],
         discount: float = 1.0,
         entropy_coefficient: float = 0.0,
+        *,
+        action_low: ArrayLike | None = None,
+        action_high: ArrayLike | None = None,
     ) -> None:
 
         if not np.isfinite(discount) or not 0 <= discount <= 1:
@@ -76,10 +86,34 @@ class A3C:
         if len(observation_sizes) != 1:
             raise ValueError("All models must have the same observation size")
 
-        if actor_model.number_of_actions != shared_actor_model.number_of_actions:
-            raise ValueError(
-                "Local and shared actors must have the same number of actions"
+        if isinstance(actor_model, DiscretePolicyNetwork):
+            if not isinstance(shared_actor_model, DiscretePolicyNetwork):
+                raise ValueError(
+                    "Local and shared actors must use the same policy type"
+                )
+            if actor_model.number_of_actions != shared_actor_model.number_of_actions:
+                raise ValueError(
+                    "Local and shared actors must have the same number of actions"
+                )
+            if action_low is not None or action_high is not None:
+                raise ValueError("Categorical A3C must not receive action bounds")
+            policy: CategoricalPolicy | SquashedGaussianPolicy = CategoricalPolicy(
+                actor_model
             )
+        elif isinstance(actor_model, GaussianPolicyNetwork):
+            if not isinstance(shared_actor_model, GaussianPolicyNetwork):
+                raise ValueError(
+                    "Local and shared actors must use the same policy type"
+                )
+            if actor_model.action_size != shared_actor_model.action_size:
+                raise ValueError(
+                    "Local and shared actors must have the same action size"
+                )
+            if action_low is None or action_high is None:
+                raise ValueError("Continuous A3C requires both action bounds")
+            policy = SquashedGaussianPolicy(actor_model, action_low, action_high)
+        else:
+            raise TypeError("Actor models must be discrete or Gaussian")
 
         _validate_model_pair(actor_model, shared_actor_model, "actors")
         _validate_model_pair(critic_model, shared_critic_model, "critics")
@@ -93,6 +127,7 @@ class A3C:
         self.update_lock = update_lock
         self.discount = discount
         self.entropy_coefficient = entropy_coefficient
+        self.policy = policy
 
         with self.update_lock:
             self._synchronize()
@@ -101,29 +136,57 @@ class A3C:
         self.actor_model.load_state_dict(self.shared_actor_model.state_dict())
         self.critic_model.load_state_dict(self.shared_critic_model.state_dict())
 
-    def select_action(self, observation: ArrayLike) -> int:
+    def sample_action(
+        self,
+        observation: ArrayLike,
+    ) -> tuple[int, int] | tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """Return environment and policy actions from one local-policy sample."""
         observation_tensor = torch.as_tensor(
             observation,
             dtype=torch.float32,
         )
 
         with torch.no_grad():
-            logits = self.actor_model(observation_tensor)
-            distribution = torch.distributions.Categorical(logits=logits)
-            action = distribution.sample()
-        return int(action.item())
+            if isinstance(self.policy, CategoricalPolicy):
+                action, _ = self.policy.sample(observation_tensor)
+                action_index = int(action.item())
+                return action_index, action_index
+
+            # The worker sends bounded actions to Gymnasium and retains latent
+            # actions for the local policy-gradient calculation.
+            environment_action, latent_action, _ = self.policy.sample(
+                observation_tensor
+            )
+            return (
+                environment_action.cpu().numpy().astype(np.float32, copy=True),
+                latent_action.cpu().numpy().astype(np.float32, copy=True),
+            )
+
+    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
+        environment_action, _ = self.sample_action(observation)
+        return environment_action
 
     def _rollout_tensors(
         self,
         steps: Sequence[EpisodeStep[NDArray[np.float32]]],
         final_state: ArrayLike,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        arrays = rollout_arrays(
-            steps,
-            final_state,
-            observation_size=self.actor_model.observation_size,
-            number_of_actions=self.actor_model.number_of_actions,
-        )
+        # Preserve categorical indices or Gaussian latent vectors so the local
+        # actor differentiates the same actions that generated the rollout.
+        if isinstance(self.policy, CategoricalPolicy):
+            arrays = rollout_arrays(
+                steps,
+                final_state,
+                observation_size=self.actor_model.observation_size,
+                number_of_actions=self.policy.model.number_of_actions,
+            )
+        else:
+            arrays = rollout_arrays(
+                steps,
+                final_state,
+                observation_size=self.actor_model.observation_size,
+                action_size=self.policy.model.action_size,
+            )
         return (
             torch.as_tensor(arrays.observations),
             torch.as_tensor(arrays.actions),
@@ -139,11 +202,16 @@ class A3C:
         terminated: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        observations_tensor, actions_tensor, rewards_tensor, final_state_tensor = (
-            self._rollout_tensors(steps, final_state)
-        )
+        (
+            observations_tensor,
+            policy_actions_tensor,
+            rewards_tensor,
+            final_state_tensor,
+        ) = self._rollout_tensors(steps, final_state)
 
         with torch.no_grad():
+            # True termination has no future value. Any nonterminal rollout
+            # bootstraps from the local critic beyond its final collected step.
             if terminated:
                 running_return = rewards_tensor.new_zeros(())
             else:
@@ -154,14 +222,16 @@ class A3C:
                 running_return = rewards_tensor[index] + self.discount * running_return
                 returns[index] = running_return
 
-        logits = self.actor_model(observations_tensor)
-        distribution = torch.distributions.Categorical(logits=logits)
-        log_probabilities = distribution.log_prob(actions_tensor)
-        entropy = distribution.entropy()
+        log_probabilities, entropy = self.policy.evaluate_actions(
+            observations_tensor,
+            policy_actions_tensor,
+        )
 
         values = self.critic_model(observations_tensor)
         advantages = returns - values
 
+        # Only the local actor and critic build gradients here. Their gradients
+        # are copied to the shared models during the locked optimizer step.
         actor_loss = -(log_probabilities * advantages.detach()).mean()
         actor_loss -= self.entropy_coefficient * entropy.mean()
 
