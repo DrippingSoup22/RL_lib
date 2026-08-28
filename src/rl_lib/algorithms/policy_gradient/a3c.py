@@ -14,6 +14,7 @@ from rl_lib.models import (
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.optimizers import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
@@ -68,6 +69,7 @@ class A3C:
         discount: float = 1.0,
         entropy_coefficient: float = 0.0,
         *,
+        max_gradient_norm: float | None = None,
         action_low: ArrayLike | None = None,
         action_high: ArrayLike | None = None,
     ) -> None:
@@ -127,6 +129,7 @@ class A3C:
         self.update_lock = update_lock
         self.discount = discount
         self.entropy_coefficient = entropy_coefficient
+        self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
         self.policy = policy
 
         with self.update_lock:
@@ -162,9 +165,22 @@ class A3C:
                 latent_action.cpu().numpy().astype(np.float32, copy=True),
             )
 
-    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
-        environment_action, _ = self.sample_action(observation)
-        return environment_action
+    def select_action(
+        self,
+        observation: ArrayLike,
+        *,
+        deterministic: bool = False,
+    ) -> int | NDArray[np.float32]:
+        if not deterministic:
+            environment_action, _ = self.sample_action(observation)
+            return environment_action
+
+        observation_tensor = torch.as_tensor(observation, dtype=torch.float32)
+        with torch.no_grad():
+            action = self.policy.deterministic_action(observation_tensor)
+        if isinstance(self.policy, CategoricalPolicy):
+            return int(action.item())
+        return action.cpu().numpy().astype(np.float32, copy=True)
 
     def _rollout_tensors(
         self,
@@ -255,6 +271,8 @@ class A3C:
         self.critic_model.zero_grad(set_to_none=True)
         actor_loss.backward()
         critic_loss.backward()
+        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.critic_model.parameters(), self.max_gradient_norm)
 
         with self.update_lock:
             self.shared_actor_optimizer.zero_grad(set_to_none=True)

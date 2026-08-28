@@ -23,6 +23,7 @@ def train_episode(
     environment_seed: int,
     action_seed: int,
     collect_diagnostics: bool,
+    reward_scale: float = 1.0,
 ) -> TrainingEpisodeResult:
     """Train A2C during one episode using bounded rollouts."""
     observation, _ = env.reset(seed=environment_seed)
@@ -55,7 +56,7 @@ def train_episode(
                     policy_action=policy_action,
                 )
             )
-            episode_return += float(reward)
+            episode_return += float(reward) / reward_scale
             episode_length += 1
             state = next_state
 

@@ -39,6 +39,7 @@ def train_episodes(
     gae_lambda: float,
     update_epochs: int,
     minibatch_size: int,
+    reward_scale: float = 1.0,
 ) -> PPOTrainingBatchResult:
     """Collect complete episodes, calculate GAE, then update one frozen batch."""
 
@@ -93,7 +94,7 @@ def train_episodes(
                     agent.actor_model.observation_size,
                 )
                 episode_length += 1
-                episode_return += float(reward)
+                episode_return += float(reward) / reward_scale
 
         # A true terminal state has no future value. A truncation still does.
         final_value = 0.0 if terminated else agent.state_value(state)
@@ -131,7 +132,13 @@ def train_episodes(
     if any(
         not all(
             math.isfinite(value)
-            for value in (update.actor_loss, update.critic_loss, update.entropy)
+            for value in (
+                update.actor_loss,
+                update.critic_loss,
+                update.entropy,
+                update.approximate_kl,
+                update.clip_fraction,
+            )
         )
         for update in minibatch_updates
     ):

@@ -31,6 +31,8 @@ class TrainingEpisodeResult:
     actor_loss: float
     critic_loss: float | None
     policy_entropy: float | None
+    approximate_kl: float | None = None
+    clip_fraction: float | None = None
 
 
 def observation_array(observation: object, observation_size: int) -> Observation:
@@ -49,6 +51,7 @@ def generate_episode(
     *,
     environment_seed: int,
     action_seed: int,
+    deterministic: bool = False,
 ) -> Episode[Observation]:
     """Sample one complete episode without changing the agent."""
     observation, _ = env.reset(seed=environment_seed)
@@ -59,7 +62,10 @@ def generate_episode(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(action_seed)
         while not (terminated or truncated):
-            if isinstance(agent, PPO):
+            if deterministic:
+                action = agent.select_action(state, deterministic=True)
+                policy_action = None
+            elif isinstance(agent, PPO):
                 # PPO has a separate frozen-batch collector; this shared path is
                 # used only for its evaluation episodes.
                 action = agent.select_action(state)

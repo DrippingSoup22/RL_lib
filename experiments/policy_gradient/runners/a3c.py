@@ -13,7 +13,11 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from experiments.policy_gradient.environments import make_environment
+from experiments.policy_gradient.environments import (
+    make_environment,
+    observation_normalizer,
+    prepare_environment,
+)
 from experiments.policy_gradient.runners.common import (
     Observation,
     TrainingEpisodeResult,
@@ -54,6 +58,9 @@ class _WorkerConfig:
     warmup_start_factor: float
     discount: float
     entropy_coefficient: float
+    max_gradient_norm: float | None
+    observation_normalization: str
+    reward_scale: float
     seed: int
     collect_diagnostics: bool
 
@@ -104,6 +111,7 @@ def _train_episode(
     environment_seed: int,
     action_seed: int,
     collect_diagnostics: bool,
+    reward_scale: float = 1.0,
 ) -> TrainingEpisodeResult:
     observation, _ = env.reset(seed=environment_seed)
     state = observation_array(observation, agent.actor_model.observation_size)
@@ -135,7 +143,7 @@ def _train_episode(
                     policy_action=policy_action,
                 )
             )
-            episode_return += float(reward)
+            episode_return += float(reward) / reward_scale
             episode_length += 1
             state = next_state
 
@@ -214,12 +222,20 @@ def _worker(
                 shared_actor_model.observation_size,
                 shared_actor_model.action_size,
                 shared_actor_model.hidden_sizes,
+                std_mode=shared_actor_model.std_mode,
             )
         else:
             raise TypeError("Shared actor must be discrete or Gaussian")
         critic_model = StateValueNetwork(
             shared_critic_model.observation_size,
             shared_critic_model.hidden_sizes,
+        )
+        normalizer = observation_normalizer(env, config.observation_normalization)
+        env = prepare_environment(
+            env,
+            normalizer,
+            update_normalization=True,
+            reward_scale=config.reward_scale,
         )
         agent = A3C(
             actor_model,
@@ -231,6 +247,7 @@ def _worker(
             update_lock,
             config.discount,
             config.entropy_coefficient,
+            max_gradient_norm=config.max_gradient_norm,
             action_low=action_low,
             action_high=action_high,
         )
@@ -269,6 +286,7 @@ def _worker(
                     10_000_000 + config.seed * config.total_episodes + episode_index
                 ),
                 collect_diagnostics=config.collect_diagnostics,
+                reward_scale=config.reward_scale,
             )
             result_queue.put(
                 A3CEpisodeResult(
@@ -327,6 +345,9 @@ def train_episodes(
     warmup_start_factor: float,
     discount: float,
     entropy_coefficient: float,
+    max_gradient_norm: float | None = None,
+    observation_normalization: str = "none",
+    reward_scale: float = 1.0,
     seed: int,
     collect_diagnostics: bool,
     max_episode_steps: int | None = None,
@@ -342,6 +363,8 @@ def train_episodes(
     )
     if episode_count == 0:
         return []
+    if observation_normalization == "running":
+        raise ValueError("A3C does not support running observation normalization")
 
     shared_actor_model.share_memory()
     shared_critic_model.share_memory()
@@ -362,6 +385,9 @@ def train_episodes(
         warmup_start_factor,
         discount,
         entropy_coefficient,
+        max_gradient_norm,
+        observation_normalization,
+        reward_scale,
         seed,
         collect_diagnostics,
     )

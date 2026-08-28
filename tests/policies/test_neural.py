@@ -68,6 +68,18 @@ def test_categorical_policy_reports_entropy_without_actions() -> None:
     torch.testing.assert_close(entropy, expected_entropy)
 
 
+def test_categorical_policy_selects_largest_logit_deterministically() -> None:
+    policy = _linear_categorical_policy()
+
+    action = policy.deterministic_action(torch.tensor([2.0, 1.0]))
+    batched_actions = policy.deterministic_action(
+        torch.tensor([[2.0, 1.0], [-1.0, 3.0]])
+    )
+
+    assert action.item() == 0
+    torch.testing.assert_close(batched_actions, torch.tensor([0, 1]))
+
+
 def test_squashed_gaussian_policy_calculates_action_transform() -> None:
     model = GaussianPolicyNetwork(3, 2, hidden_sizes=())
 

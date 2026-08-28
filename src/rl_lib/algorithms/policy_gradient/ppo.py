@@ -14,6 +14,7 @@ from rl_lib.models import (
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.optimizers import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
@@ -30,6 +31,7 @@ class PPO:
         entropy_coefficient: float = 0.0,
         seed: int | None = None,
         *,
+        max_gradient_norm: float | None = None,
         action_low: ArrayLike | None = None,
         action_high: ArrayLike | None = None,
     ) -> None:
@@ -47,6 +49,7 @@ class PPO:
         self.critic_optimizer = critic_optimizer
         self.clip_ratio = clip_ratio
         self.entropy_coefficient = entropy_coefficient
+        self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
         self.rng = np.random.default_rng(seed)
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
@@ -95,10 +98,20 @@ class PPO:
                 value=float(value.item()),
             )
 
-    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
+    def select_action(
+        self,
+        observation: ArrayLike,
+        *,
+        deterministic: bool = False,
+    ) -> int | NDArray[np.float32]:
         observation_tensor = self._observation_tensor(observation)
 
         with torch.no_grad():
+            if deterministic:
+                action = self.policy.deterministic_action(observation_tensor)
+                if isinstance(self.policy, CategoricalPolicy):
+                    return int(action.item())
+                return action.cpu().numpy().astype(np.float32, copy=True)
             if isinstance(self.policy, CategoricalPolicy):
                 action, _ = self.policy.sample(observation_tensor)
                 return int(action.item())
@@ -207,9 +220,8 @@ class PPO:
             actions_tensor,
         )
 
-        probability_ratios = torch.exp(
-            new_log_probabilities - old_log_probabilities_tensor
-        )
+        log_probability_ratios = new_log_probabilities - old_log_probabilities_tensor
+        probability_ratios = torch.exp(log_probability_ratios)
         clipped_probability_ratios = torch.clamp(
             probability_ratios,
             1 - self.clip_ratio,
@@ -226,6 +238,10 @@ class PPO:
         )
 
         entropy = entropy_values.mean()
+        approximate_kl = (probability_ratios - 1.0 - log_probability_ratios).mean()
+        clip_fraction = (
+            (torch.abs(probability_ratios - 1.0) > self.clip_ratio).float().mean()
+        )
         actor_loss = -surrogate_objectives.mean() - self.entropy_coefficient * entropy
 
         # Return targets were calculated before optimization and remain fixed.
@@ -238,11 +254,17 @@ class PPO:
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
+        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.critic_model.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
         return PPOUpdateResult(
-            float(actor_loss.item()), float(critic_loss.item()), float(entropy.item())
+            float(actor_loss.item()),
+            float(critic_loss.item()),
+            float(entropy.item()),
+            float(approximate_kl.item()),
+            float(clip_fraction.item()),
         )
 
     def _minibatch_tensors(

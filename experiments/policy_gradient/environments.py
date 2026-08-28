@@ -6,6 +6,8 @@ import gymnasium as gym
 import numpy as np
 from numpy.typing import ArrayLike
 
+from rl_lib.data import ObservationNormalizer
+
 KNOWN_ENVIRONMENTS = (
     "CartPole-v1",
     "Acrobot-v1",
@@ -16,6 +18,91 @@ KNOWN_ENVIRONMENTS = (
     "FrozenLake-v1",
     "Taxi-v4",
 )
+
+
+class NormalizeObservation(gym.ObservationWrapper):
+    """Apply one shared normalizer, updating it only for training observations."""
+
+    def __init__(
+        self,
+        env: gym.Env,
+        normalizer: ObservationNormalizer,
+        *,
+        update: bool,
+    ) -> None:
+        super().__init__(env)
+        self.normalizer = normalizer
+        self.update_statistics = update
+        if normalizer.mode == "bounds":
+            low = np.full(normalizer.observation_size, -1.0, dtype=np.float32)
+            high = np.full(normalizer.observation_size, 1.0, dtype=np.float32)
+        elif normalizer.mode == "running":
+            low = np.full(
+                normalizer.observation_size, -normalizer.clip, dtype=np.float32
+            )
+            high = np.full(
+                normalizer.observation_size, normalizer.clip, dtype=np.float32
+            )
+        else:
+            assert isinstance(env.observation_space, gym.spaces.Box)
+            low = env.observation_space.low
+            high = env.observation_space.high
+        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def observation(self, observation: object) -> np.ndarray:
+        return self.normalizer.normalize(
+            observation,
+            update=self.update_statistics,
+        )
+
+
+class ScaleReward(gym.RewardWrapper):
+    """Scale learning rewards by one positive constant."""
+
+    def __init__(self, env: gym.Env, scale: float) -> None:
+        super().__init__(env)
+        self.scale = scale
+
+    def reward(self, reward: float) -> float:
+        return float(reward) * self.scale
+
+
+def observation_normalizer(
+    env: gym.Env,
+    mode: str,
+) -> ObservationNormalizer:
+    """Build a normalizer matching one flattened Box observation space."""
+    if not isinstance(env.observation_space, gym.spaces.Box):
+        raise ValueError("observation normalization requires a Box observation space")
+    observation_size = int(np.prod(env.observation_space.shape))
+    if mode == "bounds":
+        return ObservationNormalizer(
+            observation_size,
+            mode,
+            low=env.observation_space.low,
+            high=env.observation_space.high,
+        )
+    return ObservationNormalizer(observation_size, mode)
+
+
+def prepare_environment(
+    env: gym.Env,
+    normalizer: ObservationNormalizer,
+    *,
+    update_normalization: bool,
+    reward_scale: float = 1.0,
+) -> gym.Env:
+    """Attach shared observation preprocessing and optional reward scaling."""
+    prepared = env
+    if normalizer.mode != "none":
+        prepared = NormalizeObservation(
+            prepared,
+            normalizer,
+            update=update_normalization,
+        )
+    if reward_scale != 1.0:
+        prepared = ScaleReward(prepared, reward_scale)
+    return prepared
 
 
 def make_environment(

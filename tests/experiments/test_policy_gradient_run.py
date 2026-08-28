@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from experiments.policy_gradient.run import (
+    initial_metadata,
     make_agent,
     make_environment,
     make_learning_rate_scheduler,
@@ -48,6 +49,7 @@ def test_policy_gradient_defaults_include_refined_optimization_and_a2c() -> None
     assert config.critic_learning_rate == 0.01
     assert config.optimizer == "adamw"
     assert config.weight_decay == 0.0001
+    assert config.max_gradient_norm is None
     assert config.warmup_episodes == 1
     assert config.rollout_steps == 5
     assert config.a3c_workers >= 1
@@ -57,6 +59,11 @@ def test_policy_gradient_defaults_include_refined_optimization_and_a2c() -> None
     assert config.ppo_minibatch_size == 64
     assert config.ppo_clip_ratio == 0.2
     assert config.gae_lambda == 0.95
+    assert config.continuous_std == "state-dependent"
+    assert config.initial_std == 1.0
+    assert config.observation_normalization == "none"
+    assert config.reward_scale == 1.0
+    assert config.evaluation_policy == "stochastic"
     assert config.algorithm == "a2c"
     assert config.seed_values == (0,)
     assert not config.diagnostics
@@ -131,6 +138,68 @@ def test_policy_gradient_ppo_options_are_configurable() -> None:
     assert config.ppo_minibatch_size == 8
     assert config.ppo_clip_ratio == 0.1
     assert config.gae_lambda == 0.9
+
+
+def test_policy_gradient_practical_neural_options_are_configurable() -> None:
+    config = parse_config(
+        (
+            "--preset",
+            "quick",
+            "--recordings",
+            "none",
+            "--algorithm",
+            "ppo",
+            "--environment",
+            "Pendulum-v1",
+            "--max-grad-norm",
+            "0.5",
+            "--continuous-std",
+            "global",
+            "--initial-std",
+            "0.7",
+            "--observation-normalization",
+            "bounds",
+            "--reward-scale",
+            "0.1",
+            "--evaluation-policy",
+            "deterministic",
+        )
+    )
+
+    assert config.max_gradient_norm == 0.5
+    assert config.continuous_std == "global"
+    assert config.initial_std == 0.7
+    assert config.observation_normalization == "bounds"
+    assert config.reward_scale == 0.1
+    assert config.evaluation_policy == "deterministic"
+
+    metadata = initial_metadata(config)
+    assert metadata["observation_processing"] == (
+        "flatten and map finite observation bounds to [-1, 1]"
+    )
+    assert metadata["evaluation_policy"] == "deterministic"
+    assert metadata["evaluation_policy_description"] == (
+        "frozen deterministic tanh-squashed Gaussian actor"
+    )
+    assert metadata["training_reward_processing"] == (
+        "multiply rewards used for learning by 0.1; report unscaled environment returns"
+    )
+
+
+def test_policy_gradient_rejects_running_normalization_for_a3c() -> None:
+    with pytest.raises(SystemExit):
+        parse_config(
+            (
+                "--preset",
+                "quick",
+                "--recordings",
+                "none",
+                "--algorithm",
+                "a3c",
+                "--observation-normalization",
+                "running",
+            )
+        )
 
 
 def test_make_agent_builds_configured_ppo() -> None:

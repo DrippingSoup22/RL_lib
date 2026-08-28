@@ -82,6 +82,26 @@ def test_gaussian_policy_network_bounds_log_standard_deviation() -> None:
     )
 
 
+def test_gaussian_policy_network_can_learn_one_global_standard_deviation() -> None:
+    model = GaussianPolicyNetwork(
+        3,
+        2,
+        hidden_sizes=(4,),
+        initial_std=0.5,
+        std_mode="global",
+    )
+
+    _, single_std = model(torch.zeros(3))
+    _, batch_std = model(torch.zeros(5, 3))
+
+    assert model.log_std_network is None
+    assert model.log_std is not None
+    torch.testing.assert_close(single_std, torch.full((2,), 0.5))
+    torch.testing.assert_close(batch_std, torch.full((5, 2), 0.5))
+    batch_std.sum().backward()
+    assert model.log_std.grad is not None
+
+
 @pytest.mark.parametrize(
     "constructor",
     (
@@ -92,6 +112,7 @@ def test_gaussian_policy_network_bounds_log_standard_deviation() -> None:
         lambda: GaussianPolicyNetwork(2, 2, initial_std=-1.0),
         lambda: GaussianPolicyNetwork(2, 2, initial_std=float("inf")),
         lambda: GaussianPolicyNetwork(2, 2, initial_std=float("nan")),
+        lambda: GaussianPolicyNetwork(2, 2, std_mode="invalid"),
     ),
 )
 def test_gaussian_policy_network_rejects_invalid_configuration(

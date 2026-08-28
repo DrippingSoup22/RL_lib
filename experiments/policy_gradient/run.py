@@ -32,6 +32,8 @@ from experiments.policy_gradient.environments import (
     action_name,
     episode_succeeded,
     make_environment,
+    observation_normalizer,
+    prepare_environment,
     recording_frame_stride,
 )
 from experiments.policy_gradient.report import CSV_FIELDS, write_report
@@ -52,6 +54,7 @@ from experiments.policy_gradient.runners.reinforce import (
     train_episode as train_reinforce_episode,
 )
 from rl_lib.algorithms.policy_gradient import A2C, PPO, Reinforce, ReinforceWithBaseline
+from rl_lib.data import ObservationNormalizer
 from rl_lib.models import (
     DiscretePolicyNetwork,
     GaussianPolicyNetwork,
@@ -72,9 +75,10 @@ DIAGNOSTIC_FIELDS = (
     "actor_loss",
     "critic_loss",
     "policy_entropy",
+    "approximate_kl",
+    "clip_fraction",
 )
 Agent = Reinforce | ReinforceWithBaseline | A2C | PPO
-ModelState = dict[str, torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,9 @@ def make_agent(
     hidden_sizes: tuple[int, ...],
     seed: int,
     ppo_clip_ratio: float = 0.2,
+    max_gradient_norm: float | None = None,
+    continuous_std: str = "state-dependent",
+    initial_std: float = 1.0,
 ) -> Agent:
     """Build an agent, or the shared actor-critic state used by A3C."""
     if algorithm not in ALGORITHMS:
@@ -151,6 +158,8 @@ def make_agent(
                 observation_size,
                 int(np.prod(env.action_space.shape)),
                 hidden_sizes,
+                initial_std=initial_std,
+                std_mode=continuous_std.replace("-", "_"),
             )
             action_low = env.action_space.low
             action_high = env.action_space.high
@@ -168,6 +177,7 @@ def make_agent(
                 actor_model,
                 actor_optimizer,
                 discount,
+                max_gradient_norm=max_gradient_norm,
                 action_low=action_low,
                 action_high=action_high,
             )
@@ -186,6 +196,7 @@ def make_agent(
                 critic_model,
                 critic_optimizer,
                 discount,
+                max_gradient_norm=max_gradient_norm,
                 action_low=action_low,
                 action_high=action_high,
             )
@@ -198,6 +209,7 @@ def make_agent(
                 clip_ratio=ppo_clip_ratio,
                 entropy_coefficient=entropy_coefficient,
                 seed=seed,
+                max_gradient_norm=max_gradient_norm,
                 action_low=action_low,
                 action_high=action_high,
             )
@@ -212,6 +224,7 @@ def make_agent(
             critic_optimizer,
             discount,
             entropy_coefficient,
+            max_gradient_norm=max_gradient_norm,
             action_low=action_low,
             action_high=action_high,
         )
@@ -253,6 +266,7 @@ def train_episode(
     environment_seed: int,
     action_seed: int,
     collect_diagnostics: bool,
+    reward_scale: float = 1.0,
 ) -> TrainingEpisodeResult:
     """Train one episode using the update cadence owned by the algorithm."""
     if isinstance(agent, A2C):
@@ -263,6 +277,7 @@ def train_episode(
             environment_seed=environment_seed,
             action_seed=action_seed,
             collect_diagnostics=collect_diagnostics,
+            reward_scale=reward_scale,
         )
 
     if isinstance(agent, PPO):
@@ -274,6 +289,7 @@ def train_episode(
         environment_seed=environment_seed,
         action_seed=action_seed,
         collect_diagnostics=collect_diagnostics,
+        reward_scale=reward_scale,
     )
 
 
@@ -284,8 +300,9 @@ def evaluate_episode(
     *,
     environment_seed: int,
     action_seed: int,
+    evaluation_policy: str = "stochastic",
 ) -> EvaluationResult:
-    """Evaluate the frozen stochastic actor for one episode."""
+    """Evaluate one frozen actor using the selected action mode."""
     was_training = agent.actor_model.training
     agent.actor_model.eval()
     try:
@@ -294,6 +311,7 @@ def evaluate_episode(
             agent,
             environment_seed=environment_seed,
             action_seed=action_seed,
+            deterministic=evaluation_policy == "deterministic",
         )
     finally:
         agent.actor_model.train(was_training)
@@ -327,10 +345,17 @@ def record_evaluation(
     environment_seed: int,
     action_seed: int,
     frame_stride: int,
+    evaluation_policy: str,
+    normalizer_state: dict[str, object],
 ) -> None:
-    """Record one frozen stochastic-policy episode as an annotated GIF."""
+    """Record one frozen-policy episode as an annotated GIF."""
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     env = make_environment(environment, render_mode="rgb_array")
+    env = prepare_environment(
+        env,
+        ObservationNormalizer.from_state_dict(normalizer_state),
+        update_normalization=False,
+    )
     was_training = agent.actor_model.training
     agent.actor_model.eval()
     frames: list[Image.Image] = []
@@ -338,14 +363,19 @@ def record_evaluation(
     try:
         observation, _ = env.reset(seed=environment_seed)
         state = observation_array(observation, agent.actor_model.observation_size)
-        frames.append(rendered_frame(env, "Frozen stochastic evaluation: start"))
+        frames.append(
+            rendered_frame(env, f"Frozen {evaluation_policy} evaluation: start")
+        )
         durations.append(100)
         terminated = truncated = False
         step = 0
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(action_seed)
             while not (terminated or truncated):
-                action = agent.select_action(state)
+                action = agent.select_action(
+                    state,
+                    deterministic=evaluation_policy == "deterministic",
+                )
                 observation, reward, terminated, truncated, _ = env.step(action)
                 state = observation_array(
                     observation,
@@ -424,6 +454,12 @@ def ppo_episode_training_results(
         np.mean([update.critic_loss for update in batch.minibatch_updates])
     )
     entropy = float(np.mean([update.entropy for update in batch.minibatch_updates]))
+    approximate_kl = float(
+        np.mean([update.approximate_kl for update in batch.minibatch_updates])
+    )
+    clip_fraction = float(
+        np.mean([update.clip_fraction for update in batch.minibatch_updates])
+    )
     updates_per_episode = len(batch.minibatch_updates) / len(batch.episodes)
 
     return tuple(
@@ -436,6 +472,8 @@ def ppo_episode_training_results(
             actor_loss=actor_loss,
             critic_loss=critic_loss,
             policy_entropy=entropy if collect_diagnostics else None,
+            approximate_kl=approximate_kl if collect_diagnostics else None,
+            clip_fraction=clip_fraction if collect_diagnostics else None,
         )
         for episode in batch.episodes
     )
@@ -468,6 +506,10 @@ def diagnostic_row(
         "actor_loss": result.actor_loss,
         "critic_loss": "" if result.critic_loss is None else result.critic_loss,
         "policy_entropy": result.policy_entropy,
+        "approximate_kl": (
+            "" if result.approximate_kl is None else result.approximate_kl
+        ),
+        "clip_fraction": "" if result.clip_fraction is None else result.clip_fraction,
     }
 
 
@@ -485,11 +527,22 @@ def print_diagnostic_summary(rows: list[dict[str, object]]) -> None:
     critic_text = (
         f" | critic loss={float(np.mean(critic_losses)):.3g}" if critic_losses else ""
     )
+    kl_values = [
+        float(row["approximate_kl"]) for row in rows if row["approximate_kl"] != ""
+    ]
+    ppo_text = (
+        " | KL="
+        f"{float(np.mean(kl_values)):.3g}"
+        " | clipped="
+        f"{float(np.mean([float(row['clip_fraction']) for row in rows])):.1%}"
+        if kl_values
+        else ""
+    )
     print(
         "    DIAG  | "
         f"actor loss={mean('actor_loss'):.3g}{critic_text} | "
         f"entropy={mean('policy_entropy'):.3g} | "
-        f"updates/episode={mean('updates'):.2f}",
+        f"updates/episode={mean('updates'):.2f}{ppo_text}",
         flush=True,
     )
 
@@ -516,7 +569,8 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         flush=True,
     )
     print(
-        f"  Evaluation  : {config.evaluation_episodes} episodes per checkpoint",
+        f"  Evaluation  : {config.evaluation_episodes} episodes per checkpoint; "
+        f"frozen {config.evaluation_policy} policy",
         flush=True,
     )
     print(
@@ -533,6 +587,15 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         flush=True,
     )
     print(
+        "  Grad clip   : "
+        + (
+            "off"
+            if config.max_gradient_norm is None
+            else f"max norm={config.max_gradient_norm:g} per model"
+        ),
+        flush=True,
+    )
+    print(
         f"  Actor LR    : {config.actor_learning_rate:g} -> "
         f"{config.actor_minimum_learning_rate:g}",
         flush=True,
@@ -543,6 +606,11 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         flush=True,
     )
     print(f"  Warmup      : {warmup}", flush=True)
+    print(
+        f"  Processing  : observations={config.observation_normalization}; "
+        f"learning reward scale={config.reward_scale:g}",
+        flush=True,
+    )
     if config.algorithm == "ppo":
         print(
             f"  PPO batch    : {config.ppo_batch_episodes} complete episodes; "
@@ -565,7 +633,11 @@ def print_experiment_header(config: ExperimentConfig) -> None:
         )
     print(
         "  Diagnostics : "
-        + ("training_diagnostics.csv" if config.diagnostics else "off"),
+        + (
+            "training_diagnostics.csv"
+            if config.diagnostics and config.preset != "quick"
+            else "off"
+        ),
         flush=True,
     )
 
@@ -657,7 +729,7 @@ def run_policy_gradient_experiment(
     print("=" * 72, flush=True)
     print(f"ALGORITHM: {ALGORITHM_LABELS[algorithm]}", flush=True)
     print("=" * 72, flush=True)
-    recording_states: dict[int, dict[int, dict[str, ModelState]]] = {}
+    recording_states: dict[int, dict[int, dict[str, object]]] = {}
     final_scores: dict[int, tuple[float, float]] = {}
     recording_agent: Agent | None = None
     checkpoints = evaluation_checkpoints(config.preset)
@@ -669,7 +741,21 @@ def run_policy_gradient_experiment(
         )
         print("-" * 72, flush=True)
         training_env = make_environment(config.environment)
-        evaluation_env = make_environment(config.environment)
+        normalizer = observation_normalizer(
+            training_env,
+            config.observation_normalization,
+        )
+        training_env = prepare_environment(
+            training_env,
+            normalizer,
+            update_normalization=True,
+            reward_scale=config.reward_scale,
+        )
+        evaluation_env = prepare_environment(
+            make_environment(config.environment),
+            normalizer,
+            update_normalization=False,
+        )
         agent = make_agent(
             algorithm,
             training_env,
@@ -682,6 +768,9 @@ def run_policy_gradient_experiment(
             hidden_sizes=config.hidden_sizes,
             seed=seed,
             ppo_clip_ratio=config.ppo_clip_ratio,
+            max_gradient_norm=config.max_gradient_norm,
+            continuous_std=config.continuous_std,
+            initial_std=config.initial_std,
         )
         agent_critic_optimizer = critic_optimizer(agent)
         actor_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
@@ -767,8 +856,11 @@ def run_policy_gradient_experiment(
                         warmup_start_factor=config.warmup_start_factor,
                         discount=config.discount,
                         entropy_coefficient=config.entropy_coefficient,
+                        max_gradient_norm=config.max_gradient_norm,
+                        observation_normalization=config.observation_normalization,
+                        reward_scale=config.reward_scale,
                         seed=seed,
-                        collect_diagnostics=config.diagnostics,
+                        collect_diagnostics=diagnostics_path is not None,
                         max_episode_steps=max_episode_steps,
                     )
                     training_results.extend(item.result for item in a3c_results)
@@ -830,10 +922,11 @@ def run_policy_gradient_experiment(
                             gae_lambda=config.gae_lambda,
                             update_epochs=config.ppo_update_epochs,
                             minibatch_size=config.ppo_minibatch_size,
+                            reward_scale=config.reward_scale,
                         )
                         batch_training_results = ppo_episode_training_results(
                             batch,
-                            collect_diagnostics=config.diagnostics,
+                            collect_diagnostics=diagnostics_path is not None,
                         )
                         training_results.extend(batch_training_results)
                         if diagnostics_path is not None:
@@ -887,7 +980,8 @@ def run_policy_gradient_experiment(
                                 + seed * config.training_episodes
                                 + episode_index
                             ),
-                            collect_diagnostics=config.diagnostics,
+                            collect_diagnostics=diagnostics_path is not None,
+                            reward_scale=config.reward_scale,
                         )
                         training_results.append(result)
                         if diagnostics_path is not None:
@@ -966,6 +1060,7 @@ def run_policy_gradient_experiment(
                         agent,
                         environment_seed=environment_seed,
                         action_seed=action_seed,
+                        evaluation_policy=config.evaluation_policy,
                     )
                     checkpoint_results.append(result)
                     rows.append(
@@ -1002,7 +1097,8 @@ def run_policy_gradient_experiment(
                         "actor": {
                             name: value.detach().clone()
                             for name, value in (agent.actor_model.state_dict().items())
-                        }
+                        },
+                        "normalizer": normalizer.state_dict(),
                     }
                     agent_critic_model = getattr(agent, "critic_model", None)
                     if agent_critic_model is not None:
@@ -1031,6 +1127,9 @@ def run_policy_gradient_experiment(
                     "checkpoint": 100,
                     "actor_state_dict": selected_snapshot["actor"],
                     "critic_state_dict": selected_snapshot.get("critic"),
+                    "observation_normalizer_state": selected_snapshot["normalizer"],
+                    "continuous_std": config.continuous_std,
+                    "initial_std": config.initial_std,
                 },
                 output / "best_model.pt",
             )
@@ -1049,6 +1148,10 @@ def run_policy_gradient_experiment(
                 environment_seed=2_000_000 + checkpoint,
                 action_seed=12_000_000 + checkpoint,
                 frame_stride=recording_frame_stride(config.environment),
+                evaluation_policy=config.evaluation_policy,
+                normalizer_state=recording_states[selected_seed][checkpoint][
+                    "normalizer"
+                ],
             )
             print(f"    recorded checkpoint {checkpoint}%", flush=True)
         return rows, selected_seed

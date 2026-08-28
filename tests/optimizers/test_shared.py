@@ -2,7 +2,11 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from rl_lib.optimizers import share_optimizer_state
+from rl_lib.optimizers import (
+    clip_gradients,
+    share_optimizer_state,
+    validate_max_gradient_norm,
+)
 
 
 def increment_tensor(tensor: torch.Tensor) -> None:
@@ -73,3 +77,18 @@ def test_share_optimizer_state_requires_shared_parameters() -> None:
 
     with pytest.raises(ValueError, match="shared memory"):
         share_optimizer_state(optimizer)
+
+
+def test_clip_gradients_limits_the_joint_norm() -> None:
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    parameter.grad = torch.tensor([3.0, 4.0])
+
+    clip_gradients((parameter,), 1.0)
+
+    torch.testing.assert_close(parameter.grad, torch.tensor([0.6, 0.8]))
+
+
+@pytest.mark.parametrize("value", (0.0, -1.0, float("inf"), float("nan")))
+def test_gradient_norm_validation_rejects_invalid_limits(value: float) -> None:
+    with pytest.raises(ValueError, match="gradient norm"):
+        validate_max_gradient_norm(value)

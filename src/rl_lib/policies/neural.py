@@ -35,6 +35,10 @@ class CategoricalPolicy:
         """Return categorical entropy for each observation."""
         return self._distribution(observations).entropy()
 
+    def deterministic_action(self, observation: torch.Tensor) -> torch.Tensor:
+        """Return the action with the largest categorical preference."""
+        return torch.argmax(self.model(observation), dim=-1)
+
     def _distribution(
         self,
         observation: torch.Tensor,

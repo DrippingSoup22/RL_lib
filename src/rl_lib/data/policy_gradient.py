@@ -32,3 +32,5 @@ class PPOUpdateResult:
     actor_loss: float
     critic_loss: float
     entropy: float
+    approximate_kl: float = 0.0
+    clip_fraction: float = 0.0

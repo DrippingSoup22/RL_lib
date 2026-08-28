@@ -197,9 +197,24 @@ def write_report(
             "Evaluation": f"{config.evaluation_episodes} episodes per checkpoint",
             "Seed trials": list(config.seed_values),
             "Network": list(config.hidden_sizes),
+            "Observation normalization": config.observation_normalization,
+            "Learning reward scale": config.reward_scale,
+            "Evaluation policy": config.evaluation_policy,
             "Optimizer": config.optimizer,
+            "Gradient clipping": (
+                "off" if config.max_gradient_norm is None else config.max_gradient_norm
+            ),
             "Actor learning rate": config.actor_learning_rate,
             "Critic learning rate": config.critic_learning_rate,
+            **(
+                {
+                    "Continuous std / initial": (
+                        f"{config.continuous_std} / {config.initial_std:g}"
+                    )
+                }
+                if metadata["action_space_type"] == "bounded continuous"
+                else {}
+            ),
             **(
                 {
                     "PPO batch episodes": config.ppo_batch_episodes,

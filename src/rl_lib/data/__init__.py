@@ -1,6 +1,7 @@
 """Reusable data structures for reinforcement-learning algorithms."""
 
 from rl_lib.data.episode import Episode, EpisodeStep, discounted_returns
+from rl_lib.data.normalization import ObservationNormalizer
 from rl_lib.data.policy_gradient import (
     CategoricalPPOActionSample,
     ContinuousPPOActionSample,
@@ -13,6 +14,7 @@ __all__ = [
     "ContinuousPPOActionSample",
     "Episode",
     "EpisodeStep",
+    "ObservationNormalizer",
     "PPOUpdateResult",
     "RolloutArrays",
     "discounted_returns",

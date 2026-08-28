@@ -21,6 +21,7 @@ def train_episode(
     environment_seed: int,
     action_seed: int,
     collect_diagnostics: bool,
+    reward_scale: float = 1.0,
 ) -> TrainingEpisodeResult:
     """Train one REINFORCE variant after sampling a complete episode."""
     episode = generate_episode(
@@ -34,7 +35,7 @@ def train_episode(
     if not math.isfinite(actor_loss):
         raise RuntimeError("REINFORCE produced a non-finite loss")
     return TrainingEpisodeResult(
-        episode_return=sum(step.reward for step in episode.steps),
+        episode_return=sum(step.reward for step in episode.steps) / reward_scale,
         episode_length=len(episode.steps),
         terminated=episode.terminated,
         truncated=episode.truncated,

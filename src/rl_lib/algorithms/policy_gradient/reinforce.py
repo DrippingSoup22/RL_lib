@@ -10,6 +10,7 @@ from rl_lib.models import (
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.optimizers import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 
 
@@ -22,6 +23,7 @@ class Reinforce:
         actor_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         *,
+        max_gradient_norm: float | None = None,
         action_low: ArrayLike | None = None,
         action_high: ArrayLike | None = None,
     ) -> None:
@@ -32,6 +34,7 @@ class Reinforce:
         self.actor_model = actor_model
         self.actor_optimizer = actor_optimizer
         self.discount = discount
+        self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
         if isinstance(actor_model, DiscretePolicyNetwork):
@@ -72,9 +75,22 @@ class Reinforce:
                 latent_action.cpu().numpy().astype(np.float32, copy=True),
             )
 
-    def select_action(self, observation: ArrayLike) -> int | NDArray[np.float32]:
-        environment_action, _ = self.sample_action(observation)
-        return environment_action
+    def select_action(
+        self,
+        observation: ArrayLike,
+        *,
+        deterministic: bool = False,
+    ) -> int | NDArray[np.float32]:
+        if not deterministic:
+            environment_action, _ = self.sample_action(observation)
+            return environment_action
+
+        observation_tensor = torch.as_tensor(observation, dtype=torch.float32)
+        with torch.no_grad():
+            action = self.policy.deterministic_action(observation_tensor)
+        if isinstance(self.policy, CategoricalPolicy):
+            return int(action.item())
+        return action.cpu().numpy().astype(np.float32, copy=True)
 
     def _episode_tensors(
         self,
@@ -125,6 +141,7 @@ class Reinforce:
 
         self.actor_optimizer.zero_grad()
         loss.backward()
+        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
 
         return float(loss.item())
@@ -141,6 +158,7 @@ class ReinforceWithBaseline(Reinforce):
         critic_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         *,
+        max_gradient_norm: float | None = None,
         action_low: ArrayLike | None = None,
         action_high: ArrayLike | None = None,
     ) -> None:
@@ -149,6 +167,7 @@ class ReinforceWithBaseline(Reinforce):
             actor_model,
             actor_optimizer,
             discount,
+            max_gradient_norm=max_gradient_norm,
             action_low=action_low,
             action_high=action_high,
         )
@@ -192,6 +211,8 @@ class ReinforceWithBaseline(Reinforce):
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
+        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.critic_model.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 

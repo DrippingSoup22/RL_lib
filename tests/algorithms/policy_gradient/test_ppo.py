@@ -158,6 +158,15 @@ def test_continuous_ppo_select_action_returns_only_environment_action(
     assert np.all(action <= np.asarray([2.0, 10.0]))
 
 
+def test_continuous_ppo_selects_squashed_mean_deterministically() -> None:
+    agent = make_continuous_agent()
+
+    action = agent.select_action([0.0, 0.0], deterministic=True)
+
+    assert isinstance(action, np.ndarray)
+    np.testing.assert_allclose(action, [0.0, 5.0])
+
+
 def test_ppo_requires_matching_model_observation_sizes() -> None:
     with pytest.raises(ValueError, match="observation sizes"):
         make_agent(actor_observation_size=2, critic_observation_size=3)
@@ -275,6 +284,8 @@ def test_ppo_clips_only_advantageous_policy_changes(
 
     assert result.actor_loss == pytest.approx(expected_actor_loss)
     assert result.critic_loss == pytest.approx(0.0)
+    assert result.approximate_kl == pytest.approx(ratio - 1.0 - np.log(ratio))
+    assert result.clip_fraction == pytest.approx(float(abs(ratio - 1.0) > 0.2))
 
 
 def test_ppo_updates_actor_and_critic_from_fixed_minibatch_targets() -> None:
@@ -347,6 +358,35 @@ def test_ppo_subtracts_the_configured_entropy_bonus() -> None:
 
     assert result.entropy == pytest.approx(np.log(2.0))
     assert result.actor_loss == pytest.approx(-entropy_coefficient * np.log(2.0))
+
+
+def test_ppo_clips_actor_and_critic_gradients_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = make_agent()
+    agent.max_gradient_norm = 0.5
+    clipped_limits: list[float | None] = []
+
+    def record_clipping(
+        _parameters: object,
+        max_gradient_norm: float | None,
+    ) -> None:
+        clipped_limits.append(max_gradient_norm)
+
+    monkeypatch.setattr(
+        "rl_lib.algorithms.policy_gradient.ppo.clip_gradients",
+        record_clipping,
+    )
+
+    agent.update_minibatch(
+        observations=[[0.0, 0.0]],
+        actions=[0],
+        old_log_probabilities=[-np.log(2.0)],
+        advantages=[1.0],
+        return_targets=[1.5],
+    )
+
+    assert clipped_limits == [0.5, 0.5]
 
 
 @pytest.mark.parametrize(

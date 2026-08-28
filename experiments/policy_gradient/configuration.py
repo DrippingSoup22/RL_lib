@@ -53,6 +53,7 @@ class ExperimentConfig:
     critic_minimum_learning_rate: float
     optimizer: str
     weight_decay: float
+    max_gradient_norm: float | None
     warmup_episodes: int
     warmup_start_factor: float
     discount: float
@@ -65,6 +66,11 @@ class ExperimentConfig:
     ppo_clip_ratio: float
     gae_lambda: float
     hidden_sizes: tuple[int, ...]
+    continuous_std: str
+    initial_std: float
+    observation_normalization: str
+    reward_scale: float
+    evaluation_policy: str
     diagnostics: bool
     recording_mode: str
     recording_checkpoints: tuple[int, ...]
@@ -134,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0001,
         help="weight decay applied to actor and critic (default: 0.0001)",
+    )
+    optimization.add_argument(
+        "--max-gradient-norm",
+        "--max-grad-norm",
+        type=float,
+        help="clip actor and critic gradient norms independently; omitted disables",
     )
     optimization.add_argument(
         "--warmup-episodes",
@@ -220,6 +232,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_HIDDEN_SIZES,
         metavar="N",
     )
+    model.add_argument(
+        "--continuous-std",
+        choices=("state-dependent", "global"),
+        default="state-dependent",
+        help="continuous policy standard-deviation parameterization",
+    )
+    model.add_argument(
+        "--initial-std",
+        type=float,
+        default=1.0,
+        help="initial continuous Gaussian standard deviation (default: 1)",
+    )
+
+    preprocessing = parser.add_argument_group("preprocessing")
+    preprocessing.add_argument(
+        "--observation-normalization",
+        choices=("none", "bounds", "running"),
+        default="none",
+    )
+    preprocessing.add_argument(
+        "--reward-scale",
+        type=float,
+        default=1.0,
+        help="positive scale applied only to rewards used for learning",
+    )
 
     output = parser.add_argument_group("output")
     output.add_argument(
@@ -233,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--diag",
         action="store_true",
         help="write compact per-training-episode diagnostics",
+    )
+    output.add_argument(
+        "--evaluation-policy",
+        choices=("stochastic", "deterministic"),
+        default="stochastic",
+        help="action selection used by frozen evaluation and recordings",
     )
     return parser
 
@@ -295,6 +338,10 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
         parser.error("critic minimum learning rate must be between 0 and --critic-lr")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         parser.error("weight decay must be finite and nonnegative")
+    if args.max_gradient_norm is not None and (
+        not math.isfinite(args.max_gradient_norm) or args.max_gradient_norm <= 0
+    ):
+        parser.error("maximum gradient norm must be finite and positive")
     warmup_episodes = (
         min(max(1, round(training_episodes * 0.1)), training_episodes - 1)
         if args.warmup_episodes is None and training_episodes > 1
@@ -327,6 +374,12 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
         parser.error("GAE lambda must be finite and in [0, 1]")
     if any(hidden_size <= 0 for hidden_size in args.hidden_sizes):
         parser.error("hidden sizes must be positive")
+    if not math.isfinite(args.initial_std) or args.initial_std <= 0:
+        parser.error("initial standard deviation must be finite and positive")
+    if not math.isfinite(args.reward_scale) or args.reward_scale <= 0:
+        parser.error("reward scale must be finite and positive")
+    if args.algorithm == "a3c" and args.observation_normalization == "running":
+        parser.error("A3C supports 'none' or 'bounds' observation normalization")
 
     recording_mode = {
         "quick": "none",
@@ -345,6 +398,13 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
         inspection_env = make_environment(args.environment)
     except (gym.error.Error, ValueError) as error:
         parser.error(str(error))
+    if args.observation_normalization == "bounds":
+        assert isinstance(inspection_env.observation_space, gym.spaces.Box)
+        if not np.all(np.isfinite(inspection_env.observation_space.low)) or not np.all(
+            np.isfinite(inspection_env.observation_space.high)
+        ):
+            inspection_env.close()
+            parser.error("bounds normalization requires finite observation bounds")
     if args.preset == "standard" and "rgb_array" not in inspection_env.metadata.get(
         "render_modes", []
     ):
@@ -366,6 +426,7 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
         critic_minimum_learning_rate=critic_minimum_learning_rate,
         optimizer=args.optimizer,
         weight_decay=args.weight_decay,
+        max_gradient_norm=args.max_gradient_norm,
         warmup_episodes=warmup_episodes,
         warmup_start_factor=args.warmup_start_factor,
         discount=args.discount,
@@ -378,6 +439,11 @@ def parse_config(argv: Sequence[str] | None = None) -> ExperimentConfig:
         ppo_clip_ratio=args.ppo_clip_ratio,
         gae_lambda=args.gae_lambda,
         hidden_sizes=tuple(args.hidden_sizes),
+        continuous_std=args.continuous_std,
+        initial_std=args.initial_std,
+        observation_normalization=args.observation_normalization,
+        reward_scale=args.reward_scale,
+        evaluation_policy=args.evaluation_policy,
         diagnostics=args.diagnostics,
         recording_mode=recording_mode,
         recording_checkpoints=recording_checkpoints,
@@ -418,14 +484,18 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
         action_shape: list[int] | None = None
         action_low: list[float] | None = None
         action_high: list[float] | None = None
-        evaluation_policy = "frozen stochastic categorical actor"
+        evaluation_policy_description = (
+            f"frozen {config.evaluation_policy} categorical actor"
+        )
     else:
         action_space_type = "bounded continuous"
         number_of_actions = None
         action_shape = list(inspection_env.action_space.shape)
         action_low = [float(value) for value in inspection_env.action_space.low]
         action_high = [float(value) for value in inspection_env.action_space.high]
-        evaluation_policy = "frozen stochastic tanh-squashed Gaussian actor"
+        evaluation_policy_description = (
+            f"frozen {config.evaluation_policy} tanh-squashed Gaussian actor"
+        )
     inspection_env.close()
 
     metadata = asdict(config)
@@ -437,7 +507,14 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
             "observation_shape": observation_shape,
             "observation_low": observation_low,
             "observation_high": observation_high,
-            "observation_processing": "convert to float32 and flatten; no scaling",
+            "observation_processing": {
+                "none": "convert to float32 and flatten; no normalization",
+                "bounds": "flatten and map finite observation bounds to [-1, 1]",
+                "running": (
+                    "flatten, normalize with running training mean/variance, and "
+                    "clip to [-10, 10]; freeze statistics during evaluation"
+                ),
+            }[config.observation_normalization],
             "action_space_type": action_space_type,
             "number_of_actions": number_of_actions,
             "action_shape": action_shape,
@@ -463,7 +540,11 @@ def initial_metadata(config: ExperimentConfig) -> dict[str, object]:
                 if config.recording_checkpoints
                 else None
             ),
-            "evaluation_policy": evaluation_policy,
+            "evaluation_policy_description": evaluation_policy_description,
+            "training_reward_processing": (
+                f"multiply rewards used for learning by {config.reward_scale:g}; "
+                "report unscaled environment returns"
+            ),
             "success_definition": success_definition(config.environment),
             "episode_stopping": "termination or truncation",
             "truncation_target": (
