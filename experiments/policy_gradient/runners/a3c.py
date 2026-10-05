@@ -25,13 +25,13 @@ from experiments.policy_gradient.runners.common import (
     observation_array,
 )
 from rl_lib.algorithms.policy_gradient import A3C
-from rl_lib.data import EpisodeStep
-from rl_lib.models import (
-    DiscretePolicyNetwork,
+from rl_lib.networks import (
+    CategoricalPolicyNetwork,
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
-from rl_lib.optimizers import share_optimizer_state
+from rl_lib.optimization import share_optimizer_state
+from rl_lib.trajectories import EpisodeStep
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ def _train_episode(
     reward_scale: float = 1.0,
 ) -> TrainingEpisodeResult:
     observation, _ = env.reset(seed=environment_seed)
-    state = observation_array(observation, agent.actor_model.observation_size)
+    state = observation_array(observation, agent.actor_network.observation_size)
     rollout: list[EpisodeStep[Observation]] = []
     terminated = truncated = False
     episode_return = 0.0
@@ -131,7 +131,7 @@ def _train_episode(
             next_observation, reward, terminated, truncated, _ = env.step(action)
             next_state = observation_array(
                 next_observation,
-                agent.actor_model.observation_size,
+                agent.actor_network.observation_size,
             )
             # Each worker interacts with the bounded action but differentiates
             # the corresponding unsquashed policy action during its update.
@@ -182,9 +182,9 @@ def _train_episode(
 def _worker(
     worker: int,
     config: _WorkerConfig,
-    shared_actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+    shared_actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
     shared_actor_optimizer: torch.optim.Optimizer,
-    shared_critic_model: StateValueNetwork,
+    shared_critic_network: StateValueNetwork,
     shared_critic_optimizer: torch.optim.Optimizer,
     update_lock: Any,
     next_episode: Any,
@@ -201,34 +201,34 @@ def _worker(
         )
         if not isinstance(env.observation_space, gym.spaces.Box):
             raise ValueError("A3C environment must have a Box observation space")
-        if isinstance(shared_actor_model, DiscretePolicyNetwork):
+        if isinstance(shared_actor_network, CategoricalPolicyNetwork):
             if not isinstance(env.action_space, gym.spaces.Discrete):
                 raise ValueError("Categorical A3C requires a Discrete action space")
             action_low = action_high = None
-            actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork = (
-                DiscretePolicyNetwork(
-                    shared_actor_model.observation_size,
-                    shared_actor_model.number_of_actions,
-                    shared_actor_model.hidden_sizes,
+            actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork = (
+                CategoricalPolicyNetwork(
+                    shared_actor_network.observation_size,
+                    shared_actor_network.number_of_actions,
+                    shared_actor_network.hidden_sizes,
                 )
             )
-        elif isinstance(shared_actor_model, GaussianPolicyNetwork):
+        elif isinstance(shared_actor_network, GaussianPolicyNetwork):
             if not isinstance(env.action_space, gym.spaces.Box):
                 raise ValueError("Continuous A3C requires a Box action space")
             # The local environment owns the bounds used to transform actions.
             action_low = env.action_space.low
             action_high = env.action_space.high
-            actor_model = GaussianPolicyNetwork(
-                shared_actor_model.observation_size,
-                shared_actor_model.action_size,
-                shared_actor_model.hidden_sizes,
-                std_mode=shared_actor_model.std_mode,
+            actor_network = GaussianPolicyNetwork(
+                shared_actor_network.observation_size,
+                shared_actor_network.action_size,
+                shared_actor_network.hidden_sizes,
+                std_mode=shared_actor_network.std_mode,
             )
         else:
             raise TypeError("Shared actor must be discrete or Gaussian")
-        critic_model = StateValueNetwork(
-            shared_critic_model.observation_size,
-            shared_critic_model.hidden_sizes,
+        critic_network = StateValueNetwork(
+            shared_critic_network.observation_size,
+            shared_critic_network.hidden_sizes,
         )
         normalizer = observation_normalizer(env, config.observation_normalization)
         env = prepare_environment(
@@ -238,11 +238,11 @@ def _worker(
             reward_scale=config.reward_scale,
         )
         agent = A3C(
-            actor_model,
-            shared_actor_model,
+            actor_network,
+            shared_actor_network,
             shared_actor_optimizer,
-            critic_model,
-            shared_critic_model,
+            critic_network,
+            shared_critic_network,
             shared_critic_optimizer,
             update_lock,
             config.discount,
@@ -327,9 +327,9 @@ def _validate_training_request(
 
 def train_episodes(
     environment: str,
-    shared_actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+    shared_actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
     shared_actor_optimizer: torch.optim.Optimizer,
-    shared_critic_model: StateValueNetwork,
+    shared_critic_network: StateValueNetwork,
     shared_critic_optimizer: torch.optim.Optimizer,
     *,
     episode_start: int,
@@ -366,8 +366,8 @@ def train_episodes(
     if observation_normalization == "running":
         raise ValueError("A3C does not support running observation normalization")
 
-    shared_actor_model.share_memory()
-    shared_critic_model.share_memory()
+    shared_actor_network.share_memory()
+    shared_critic_network.share_memory()
     share_optimizer_state(shared_actor_optimizer)
     share_optimizer_state(shared_critic_optimizer)
 
@@ -402,9 +402,9 @@ def train_episodes(
             args=(
                 worker,
                 config,
-                shared_actor_model,
+                shared_actor_network,
                 shared_actor_optimizer,
-                shared_critic_model,
+                shared_critic_network,
                 shared_critic_optimizer,
                 update_lock,
                 next_episode,

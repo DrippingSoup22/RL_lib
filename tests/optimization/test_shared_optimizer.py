@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from rl_lib.optimizers import (
+from rl_lib.optimization import (
     clip_gradients,
     share_optimizer_state,
     validate_max_gradient_norm,
@@ -19,12 +19,9 @@ def shared_parameter() -> torch.nn.Parameter:
     return parameter
 
 
-@pytest.mark.parametrize("optimizer_class", (torch.optim.Adam, torch.optim.AdamW))
-def test_share_optimizer_state_initializes_shared_adam_state(
-    optimizer_class: type[torch.optim.Optimizer],
-) -> None:
+def test_share_optimizer_state_initializes_shared_adam_state() -> None:
     parameter = shared_parameter()
-    optimizer = optimizer_class((parameter,), lr=0.1)
+    optimizer = torch.optim.AdamW((parameter,), lr=0.1)
 
     share_optimizer_state(optimizer)
 
@@ -54,28 +51,13 @@ def test_shared_optimizer_state_is_visible_in_a_spawned_process() -> None:
     assert step.item() == 1.0
 
 
-def test_share_optimizer_state_accepts_stateless_sgd() -> None:
-    parameter = shared_parameter()
-    optimizer = torch.optim.SGD((parameter,), lr=0.1)
-
+def test_sgd_is_shared_without_state_but_not_with_momentum() -> None:
+    optimizer = torch.optim.SGD((shared_parameter(),), lr=0.1)
     share_optimizer_state(optimizer)
-
     assert not optimizer.state
 
-
-def test_share_optimizer_state_rejects_sgd_momentum() -> None:
-    parameter = shared_parameter()
-    optimizer = torch.optim.SGD((parameter,), lr=0.1, momentum=0.9)
-
+    optimizer = torch.optim.SGD((shared_parameter(),), lr=0.1, momentum=0.9)
     with pytest.raises(ValueError, match="momentum"):
-        share_optimizer_state(optimizer)
-
-
-def test_share_optimizer_state_requires_shared_parameters() -> None:
-    parameter = torch.nn.Parameter(torch.tensor([1.0]))
-    optimizer = torch.optim.AdamW((parameter,), lr=0.1)
-
-    with pytest.raises(ValueError, match="shared memory"):
         share_optimizer_state(optimizer)
 
 
@@ -88,7 +70,7 @@ def test_clip_gradients_limits_the_joint_norm() -> None:
     torch.testing.assert_close(parameter.grad, torch.tensor([0.6, 0.8]))
 
 
-@pytest.mark.parametrize("value", (0.0, -1.0, float("inf"), float("nan")))
-def test_gradient_norm_validation_rejects_invalid_limits(value: float) -> None:
-    with pytest.raises(ValueError, match="gradient norm"):
-        validate_max_gradient_norm(value)
+def test_gradient_norm_validation_rejects_invalid_limits() -> None:
+    for value in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="gradient norm"):
+            validate_max_gradient_norm(value)

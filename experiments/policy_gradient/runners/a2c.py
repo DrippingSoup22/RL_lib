@@ -12,7 +12,7 @@ from experiments.policy_gradient.runners.common import (
     observation_array,
 )
 from rl_lib.algorithms.policy_gradient import A2C
-from rl_lib.data import EpisodeStep
+from rl_lib.trajectories import EpisodeStep
 
 
 def train_episode(
@@ -27,7 +27,7 @@ def train_episode(
 ) -> TrainingEpisodeResult:
     """Train A2C during one episode using bounded rollouts."""
     observation, _ = env.reset(seed=environment_seed)
-    state = observation_array(observation, agent.actor_model.observation_size)
+    state = observation_array(observation, agent.actor_network.observation_size)
     rollout: list[EpisodeStep[Observation]] = []
     terminated = truncated = False
     episode_return = 0.0
@@ -44,7 +44,7 @@ def train_episode(
             next_observation, reward, terminated, truncated, _ = env.step(action)
             next_state = observation_array(
                 next_observation,
-                agent.actor_model.observation_size,
+                agent.actor_network.observation_size,
             )
             # Keep the bounded action for the environment record and the latent
             # action used to reevaluate a continuous policy during the update.

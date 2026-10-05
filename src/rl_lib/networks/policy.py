@@ -1,11 +1,11 @@
-"""Neural policy models for discrete and continuous action spaces."""
+"""Policy networks for categorical and continuous action spaces."""
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 
-class DiscretePolicyNetwork(nn.Module):
+class CategoricalPolicyNetwork(nn.Module):
     """Map observations to one unnormalized logit per discrete action."""
 
     def __init__(

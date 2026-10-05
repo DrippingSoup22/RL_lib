@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data.episode import EpisodeStep
+from rl_lib.trajectories.episode import EpisodeStep
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep, rollout_arrays
-from rl_lib.models import StateValueNetwork
+from rl_lib.networks import StateValueNetwork
+from rl_lib.trajectories import EpisodeStep, rollout_arrays
 
 
 class SemiGradientTDPrediction:

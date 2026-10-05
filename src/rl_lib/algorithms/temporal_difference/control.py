@@ -4,8 +4,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from rl_lib.data import EpisodeStep, discounted_returns
 from rl_lib.policies import TabularPolicy, epsilon_soft_probabilities
+from rl_lib.trajectories import EpisodeStep, discounted_returns
 
 
 class _TabularControl:

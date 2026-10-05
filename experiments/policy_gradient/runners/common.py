@@ -15,7 +15,7 @@ from rl_lib.algorithms.policy_gradient import (
     Reinforce,
     ReinforceWithBaseline,
 )
-from rl_lib.data import Episode, EpisodeStep
+from rl_lib.trajectories import Episode, EpisodeStep
 
 PolicyAgent = Reinforce | ReinforceWithBaseline | A2C | A3C | PPO
 Observation = NDArray[np.float32]
@@ -45,6 +45,31 @@ def observation_array(observation: object, observation_size: int) -> Observation
     return result.copy()
 
 
+def environment_action(action: torch.Tensor) -> int | NDArray[np.float32]:
+    """One PPO action as Gymnasium expects it: an integer or a float32 array."""
+    if action.ndim == 0:
+        return int(action.item())
+    return action.cpu().numpy().astype(np.float32)
+
+
+def select_environment_action(
+    agent: PolicyAgent,
+    state: Observation,
+    *,
+    deterministic: bool,
+) -> int | NDArray[np.float32]:
+    """Choose an evaluation action without changing the agent.
+
+    PPO acts on batches of tensors, so its batch here is the one observation.
+    """
+    if not isinstance(agent, PPO):
+        return agent.select_action(state, deterministic=deterministic)
+    observations = torch.as_tensor(state, device=agent.device).unsqueeze(0)
+    return environment_action(
+        agent.select_action(observations, deterministic=deterministic)[0]
+    )
+
+
 def generate_episode(
     env: gym.Env,
     agent: PolicyAgent,
@@ -55,20 +80,19 @@ def generate_episode(
 ) -> Episode[Observation]:
     """Sample one complete episode without changing the agent."""
     observation, _ = env.reset(seed=environment_seed)
-    state = observation_array(observation, agent.actor_model.observation_size)
+    state = observation_array(observation, agent.actor_network.observation_size)
     steps: list[EpisodeStep[Observation]] = []
     terminated = truncated = False
 
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(action_seed)
         while not (terminated or truncated):
-            if deterministic:
-                action = agent.select_action(state, deterministic=True)
-                policy_action = None
-            elif isinstance(agent, PPO):
+            if deterministic or isinstance(agent, PPO):
                 # PPO has a separate frozen-batch collector; this shared path is
                 # used only for its evaluation episodes.
-                action = agent.select_action(state)
+                action = select_environment_action(
+                    agent, state, deterministic=deterministic
+                )
                 policy_action = None
             else:
                 action, policy_action = agent.sample_action(state)
@@ -83,7 +107,7 @@ def generate_episode(
             )
             state = observation_array(
                 next_observation,
-                agent.actor_model.observation_size,
+                agent.actor_network.observation_size,
             )
 
     return Episode(

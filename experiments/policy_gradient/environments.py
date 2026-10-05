@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import gymnasium as gym
 import numpy as np
+import torch
 from numpy.typing import ArrayLike
 
-from rl_lib.data import ObservationNormalizer
+from rl_lib.normalization import ObservationNormalizer
 
 KNOWN_ENVIRONMENTS = (
     "CartPole-v1",
     "Acrobot-v1",
     "MountainCar-v0",
     "MountainCarContinuous-v0",
+    "Pendulum-v1",
     "Blackjack-v1",
     "CliffWalking-v1",
     "FrozenLake-v1",
@@ -38,10 +40,10 @@ class NormalizeObservation(gym.ObservationWrapper):
             high = np.full(normalizer.observation_size, 1.0, dtype=np.float32)
         elif normalizer.mode == "running":
             low = np.full(
-                normalizer.observation_size, -normalizer.clip, dtype=np.float32
+                normalizer.observation_size, -normalizer.clip_limit, dtype=np.float32
             )
             high = np.full(
-                normalizer.observation_size, normalizer.clip, dtype=np.float32
+                normalizer.observation_size, normalizer.clip_limit, dtype=np.float32
             )
         else:
             assert isinstance(env.observation_space, gym.spaces.Box)
@@ -50,10 +52,12 @@ class NormalizeObservation(gym.ObservationWrapper):
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
     def observation(self, observation: object) -> np.ndarray:
-        return self.normalizer.normalize(
-            observation,
-            update=self.update_statistics,
+        # The normalizer works on tensors; Gymnasium expects a flat array.
+        flat = torch.as_tensor(np.asarray(observation, dtype=np.float32).reshape(-1))
+        normalized = self.normalizer.normalize(
+            flat, update_statistics=self.update_statistics
         )
+        return normalized.numpy()
 
 
 class ScaleReward(gym.RewardWrapper):
@@ -79,8 +83,8 @@ def observation_normalizer(
         return ObservationNormalizer(
             observation_size,
             mode,
-            low=env.observation_space.low,
-            high=env.observation_space.high,
+            low=torch.as_tensor(env.observation_space.low).reshape(-1),
+            high=torch.as_tensor(env.observation_space.high).reshape(-1),
         )
     return ObservationNormalizer(observation_size, mode)
 
@@ -186,6 +190,8 @@ def success_definition(environment: str) -> str:
         return "true termination after the car reaches the goal"
     if environment == "MountainCarContinuous-v0":
         return "true termination after the continuous-control car reaches the goal"
+    if environment == "Pendulum-v1":
+        return "none: episodes only end at the time limit, so judge by return"
     if environment in ("Blackjack-v1", "FrozenLake-v1"):
         return "positive reward on true termination"
     if environment == "CliffWalking-v1":
@@ -196,9 +202,11 @@ def success_definition(environment: str) -> str:
 
 
 def action_name(environment: str, action: int | ArrayLike) -> str:
-    if environment == "MountainCarContinuous-v0":
+    continuous_labels = {"MountainCarContinuous-v0": "force", "Pendulum-v1": "torque"}
+    if environment in continuous_labels:
         values = np.asarray(action, dtype=np.float32).reshape(-1)
-        return "force [" + ", ".join(f"{value:.3g}" for value in values) + "]"
+        label = continuous_labels[environment]
+        return f"{label} [" + ", ".join(f"{value:.3g}" for value in values) + "]"
 
     labels = {
         "CartPole-v1": ("push left", "push right"),

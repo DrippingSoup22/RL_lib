@@ -1,3 +1,4 @@
+import dataclasses
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -5,14 +6,17 @@ from dataclasses import dataclass
 import gymnasium as gym
 import numpy as np
 import torch
-from numpy.typing import NDArray
 
-from experiments.policy_gradient.runners.common import Observation, observation_array
+from experiments.policy_gradient.runners.common import (
+    Observation,
+    environment_action,
+    observation_array,
+)
 from rl_lib.algorithms.policy_gradient import (
     PPO,
+    PPOUpdateSummary,
     generalized_advantage_estimates,
 )
-from rl_lib.data import ContinuousPPOActionSample, PPOUpdateResult
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,8 @@ class PPOEpisodeResult:
 @dataclass(frozen=True)
 class PPOTrainingBatchResult:
     episodes: tuple[PPOEpisodeResult, ...]
-    minibatch_updates: tuple[PPOUpdateResult, ...]
+    update: PPOUpdateSummary
+    minibatch_count: int
 
 
 def train_episodes(
@@ -41,7 +46,11 @@ def train_episodes(
     minibatch_size: int,
     reward_scale: float = 1.0,
 ) -> PPOTrainingBatchResult:
-    """Collect complete episodes, calculate GAE, then update one frozen batch."""
+    """Collect complete episodes, calculate GAE, then update one frozen batch.
+
+    PPO acts on batches of tensors; here each batch is the one observation of
+    a single Gymnasium environment.
+    """
 
     if len(environment_seeds) == 0 or len(action_seeds) == 0:
         raise ValueError("Environment and action seeds must be nonempty")
@@ -49,11 +58,14 @@ def train_episodes(
         raise ValueError("Environment and action seeds must have the same length")
 
     batch_observations: list[Observation] = []
-    batch_policy_actions: list[int | NDArray[np.float32]] = []
-    batch_old_log_probabilities: list[float] = []
-    batch_advantages: list[float] = []
-    batch_return_targets: list[float] = []
+    batch_policy_actions: list[torch.Tensor] = []
+    batch_old_log_probabilities: list[torch.Tensor] = []
+    batch_advantages: list[torch.Tensor] = []
+    batch_return_targets: list[torch.Tensor] = []
     episode_results: list[PPOEpisodeResult] = []
+
+    def as_batch(state: Observation) -> torch.Tensor:
+        return torch.as_tensor(state, device=agent.device).unsqueeze(0)
 
     for environment_seed, action_seed in zip(
         environment_seeds,
@@ -61,56 +73,64 @@ def train_episodes(
         strict=True,
     ):
         observation, _ = env.reset(seed=environment_seed)
-        state = observation_array(observation, agent.actor_model.observation_size)
+        state = observation_array(observation, agent.actor_network.observation_size)
         terminated = truncated = False
         episode_return = 0.0
         episode_length = 0
         episode_rewards: list[float] = []
-        episode_values: list[float] = []
+        episode_values: list[torch.Tensor] = []
 
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(action_seed)
             while not (terminated or truncated):
-                sample = agent.sample_action(state)
+                sample = agent.sample_action(as_batch(state))
                 next_observation, reward, terminated, truncated, _ = env.step(
-                    sample.action
+                    environment_action(sample.environment_action[0])
                 )
 
+                # Learning re-evaluates the policy action: the action itself for
+                # categorical PPO, the latent Gaussian sample for continuous PPO.
                 batch_observations.append(state)
-                # Categorical actions are reevaluated directly. Continuous PPO
-                # instead stores the raw Gaussian sample, while only its bounded
-                # transformation is sent to the environment above.
-                batch_policy_actions.append(
-                    sample.latent_action
-                    if isinstance(sample, ContinuousPPOActionSample)
-                    else sample.action
-                )
-                batch_old_log_probabilities.append(sample.log_probability)
+                batch_policy_actions.append(sample.policy_action[0])
+                batch_old_log_probabilities.append(sample.log_probability[0])
                 episode_rewards.append(float(reward))
-                episode_values.append(sample.value)
+                episode_values.append(sample.value[0])
 
                 state = observation_array(
                     next_observation,
-                    agent.actor_model.observation_size,
+                    agent.actor_network.observation_size,
                 )
                 episode_length += 1
                 episode_return += float(reward) / reward_scale
 
         # A true terminal state has no future value. A truncation still does.
-        final_value = 0.0 if terminated else agent.state_value(state)
+        final_value = (
+            torch.zeros((), device=agent.device)
+            if terminated
+            else agent.state_value(as_batch(state))[0]
+        )
 
+        # Inside the episode, a step's next value is the following step's own
+        # value; after the final step it is the final state's. Collection runs
+        # whole episodes, so the episode ends exactly on its final step.
+        values = torch.stack(episode_values)
+        next_values = torch.cat((values[1:], final_value.unsqueeze(0)))
+        final_step = torch.arange(episode_length, device=agent.device) == (
+            episode_length - 1
+        )
         advantages, return_targets = generalized_advantage_estimates(
-            episode_rewards,
-            episode_values,
-            final_value,
-            terminated=terminated,
+            torch.tensor(episode_rewards, device=agent.device),
+            values,
+            next_values,
+            terminated=final_step & bool(terminated),
+            episode_ended=final_step,
             discount=discount,
             gae_lambda=gae_lambda,
         )
 
         # Keep these aligned transition-for-transition with the collected data.
-        batch_advantages.extend(float(value) for value in advantages)
-        batch_return_targets.extend(float(value) for value in return_targets)
+        batch_advantages.append(advantages)
+        batch_return_targets.append(return_targets)
         episode_results.append(
             PPOEpisodeResult(
                 episode_return=episode_return,
@@ -120,31 +140,21 @@ def train_episodes(
             )
         )
 
-    minibatch_updates = agent.update(
-        np.asarray(batch_observations, dtype=np.float32),
-        np.asarray(batch_policy_actions),
-        np.asarray(batch_old_log_probabilities, dtype=np.float32),
-        np.asarray(batch_advantages, dtype=np.float32),
-        np.asarray(batch_return_targets, dtype=np.float32),
+    sample_count = len(batch_observations)
+    summary = agent.update(
+        torch.as_tensor(np.asarray(batch_observations), device=agent.device),
+        torch.stack(batch_policy_actions),
+        torch.stack(batch_old_log_probabilities),
+        torch.cat(batch_advantages),
+        torch.cat(batch_return_targets),
         update_epochs=update_epochs,
         minibatch_size=minibatch_size,
     )
-    if any(
-        not all(
-            math.isfinite(value)
-            for value in (
-                update.actor_loss,
-                update.critic_loss,
-                update.entropy,
-                update.approximate_kl,
-                update.clip_fraction,
-            )
-        )
-        for update in minibatch_updates
-    ):
+    if not all(math.isfinite(value) for value in dataclasses.astuple(summary)):
         raise RuntimeError("PPO produced a non-finite update result")
 
     return PPOTrainingBatchResult(
         episodes=tuple(episode_results),
-        minibatch_updates=minibatch_updates,
+        update=summary,
+        minibatch_count=update_epochs * math.ceil(sample_count / minibatch_size),
     )

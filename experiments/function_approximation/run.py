@@ -45,8 +45,8 @@ from rl_lib.algorithms.function_approximation import (
     SemiGradientSARSA,
     SemiGradientTDPrediction,
 )
-from rl_lib.data import EpisodeStep, discounted_returns
-from rl_lib.models import ActionValueNetwork, StateValueNetwork
+from rl_lib.networks import ActionValueNetwork, StateValueNetwork
+from rl_lib.trajectories import EpisodeStep, discounted_returns
 
 DIAGNOSTIC_FIELDS = (
     "algorithm",

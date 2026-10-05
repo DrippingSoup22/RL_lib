@@ -41,7 +41,7 @@ from rl_lib.algorithms.temporal_difference import (
     QLearning,
     TDPrediction,
 )
-from rl_lib.data import EpisodeStep
+from rl_lib.trajectories import EpisodeStep
 
 ALGORITHMS = ("td_prediction", "sarsa", "q_learning")
 

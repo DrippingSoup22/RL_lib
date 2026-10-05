@@ -14,8 +14,10 @@ first principles and validates them with Gymnasium experiments.
 | Policy gradients | REINFORCE with baseline, A2C, A3C, TRPO, and PPO |
 
 Bandits, Monte Carlo, tabular temporal-difference, function approximation, the
-two REINFORCE variants, A2C, A3C, and discrete-action PPO are implemented. See
-[`docs/roadmap.md`](docs/roadmap.md) for the planned order.
+two REINFORCE variants, A2C, A3C, and PPO with discrete or bounded continuous
+actions are implemented. See [`docs/roadmap.md`](docs/roadmap.md) for the planned
+order, and [`docs/batched-ppo.md`](docs/batched-ppo.md) for the batched PPO
+being added for many parallel environments.
 
 ## Structure
 

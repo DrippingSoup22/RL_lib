@@ -47,6 +47,7 @@ from experiments.policy_gradient.runners.common import (
     TrainingEpisodeResult,
     generate_episode,
     observation_array,
+    select_environment_action,
 )
 from experiments.policy_gradient.runners.ppo import PPOTrainingBatchResult
 from experiments.policy_gradient.runners.ppo import train_episodes as train_ppo_episodes
@@ -54,12 +55,12 @@ from experiments.policy_gradient.runners.reinforce import (
     train_episode as train_reinforce_episode,
 )
 from rl_lib.algorithms.policy_gradient import A2C, PPO, Reinforce, ReinforceWithBaseline
-from rl_lib.data import ObservationNormalizer
-from rl_lib.models import (
-    DiscretePolicyNetwork,
+from rl_lib.networks import (
+    CategoricalPolicyNetwork,
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.normalization import ObservationNormalizer
 
 DIAGNOSTIC_FIELDS = (
     "algorithm",
@@ -145,8 +146,8 @@ def make_agent(
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         if isinstance(env.action_space, gym.spaces.Discrete):
-            actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork = (
-                DiscretePolicyNetwork(
+            actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork = (
+                CategoricalPolicyNetwork(
                     observation_size,
                     int(env.action_space.n),
                     hidden_sizes,
@@ -154,7 +155,7 @@ def make_agent(
             )
             action_low = action_high = None
         elif isinstance(env.action_space, gym.spaces.Box):
-            actor_model = GaussianPolicyNetwork(
+            actor_network = GaussianPolicyNetwork(
                 observation_size,
                 int(np.prod(env.action_space.shape)),
                 hidden_sizes,
@@ -168,13 +169,13 @@ def make_agent(
 
         actor_optimizer = make_optimizer(
             optimizer_name,
-            actor_model.parameters(),
+            actor_network.parameters(),
             actor_learning_rate,
             weight_decay,
         )
         if algorithm == "reinforce":
             return Reinforce(
-                actor_model,
+                actor_network,
                 actor_optimizer,
                 discount,
                 max_gradient_norm=max_gradient_norm,
@@ -182,18 +183,18 @@ def make_agent(
                 action_high=action_high,
             )
 
-        critic_model = StateValueNetwork(observation_size, hidden_sizes)
+        critic_network = StateValueNetwork(observation_size, hidden_sizes)
         critic_optimizer = make_optimizer(
             optimizer_name,
-            critic_model.parameters(),
+            critic_network.parameters(),
             critic_learning_rate,
             weight_decay,
         )
         if algorithm == "reinforce_with_baseline":
             return ReinforceWithBaseline(
-                actor_model,
+                actor_network,
                 actor_optimizer,
-                critic_model,
+                critic_network,
                 critic_optimizer,
                 discount,
                 max_gradient_norm=max_gradient_norm,
@@ -202,13 +203,13 @@ def make_agent(
             )
         if algorithm == "ppo":
             return PPO(
-                actor_model,
+                actor_network,
                 actor_optimizer,
-                critic_model,
+                critic_network,
                 critic_optimizer,
                 clip_ratio=ppo_clip_ratio,
                 entropy_coefficient=entropy_coefficient,
-                seed=seed,
+                shuffle_seed=seed,
                 max_gradient_norm=max_gradient_norm,
                 action_low=action_low,
                 action_high=action_high,
@@ -218,9 +219,9 @@ def make_agent(
         # A3C workers wrap these shared models in A3C. The parent keeps this
         # synchronous container only for frozen evaluation and recordings.
         return A2C(
-            actor_model,
+            actor_network,
             actor_optimizer,
-            critic_model,
+            critic_network,
             critic_optimizer,
             discount,
             entropy_coefficient,
@@ -303,8 +304,8 @@ def evaluate_episode(
     evaluation_policy: str = "stochastic",
 ) -> EvaluationResult:
     """Evaluate one frozen actor using the selected action mode."""
-    was_training = agent.actor_model.training
-    agent.actor_model.eval()
+    was_training = agent.actor_network.training
+    agent.actor_network.eval()
     try:
         episode = generate_episode(
             env,
@@ -314,7 +315,7 @@ def evaluate_episode(
             deterministic=evaluation_policy == "deterministic",
         )
     finally:
-        agent.actor_model.train(was_training)
+        agent.actor_network.train(was_training)
 
     return EvaluationResult(
         episode_return=sum(step.reward for step in episode.steps),
@@ -356,13 +357,13 @@ def record_evaluation(
         ObservationNormalizer.from_state_dict(normalizer_state),
         update_normalization=False,
     )
-    was_training = agent.actor_model.training
-    agent.actor_model.eval()
+    was_training = agent.actor_network.training
+    agent.actor_network.eval()
     frames: list[Image.Image] = []
     durations: list[int] = []
     try:
         observation, _ = env.reset(seed=environment_seed)
-        state = observation_array(observation, agent.actor_model.observation_size)
+        state = observation_array(observation, agent.actor_network.observation_size)
         frames.append(
             rendered_frame(env, f"Frozen {evaluation_policy} evaluation: start")
         )
@@ -372,14 +373,15 @@ def record_evaluation(
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(action_seed)
             while not (terminated or truncated):
-                action = agent.select_action(
+                action = select_environment_action(
+                    agent,
                     state,
                     deterministic=evaluation_policy == "deterministic",
                 )
                 observation, reward, terminated, truncated, _ = env.step(action)
                 state = observation_array(
                     observation,
-                    agent.actor_model.observation_size,
+                    agent.actor_network.observation_size,
                 )
                 step += 1
                 if step % frame_stride == 0 or terminated or truncated:
@@ -392,7 +394,7 @@ def record_evaluation(
                     )
                     durations.append(1_000 if terminated or truncated else 100)
     finally:
-        agent.actor_model.train(was_training)
+        agent.actor_network.train(was_training)
         env.close()
 
     frames[0].save(
@@ -447,20 +449,12 @@ def ppo_episode_training_results(
     """Attach batch-level PPO diagnostics to each episode for shared reporting."""
     if not batch.episodes:
         raise ValueError("PPO training batches must contain at least one episode")
-    actor_loss = float(
-        np.mean([update.actor_loss for update in batch.minibatch_updates])
-    )
-    critic_loss = float(
-        np.mean([update.critic_loss for update in batch.minibatch_updates])
-    )
-    entropy = float(np.mean([update.entropy for update in batch.minibatch_updates]))
-    approximate_kl = float(
-        np.mean([update.approximate_kl for update in batch.minibatch_updates])
-    )
-    clip_fraction = float(
-        np.mean([update.clip_fraction for update in batch.minibatch_updates])
-    )
-    updates_per_episode = len(batch.minibatch_updates) / len(batch.episodes)
+    actor_loss = batch.update.actor_loss
+    critic_loss = batch.update.critic_loss
+    entropy = batch.update.entropy
+    approximate_kl = batch.update.approximate_kl
+    clip_fraction = batch.update.clip_fraction
+    updates_per_episode = batch.minibatch_count / len(batch.episodes)
 
     return tuple(
         TrainingEpisodeResult(
@@ -835,9 +829,9 @@ def run_policy_gradient_experiment(
                     )
                     a3c_results = train_a3c_episodes(
                         config.environment,
-                        agent.actor_model,
+                        agent.actor_network,
                         agent.actor_optimizer,
-                        agent.critic_model,
+                        agent.critic_network,
                         agent.critic_optimizer,
                         episode_start=completed_episodes,
                         episode_count=target_episodes - completed_episodes,
@@ -1096,15 +1090,19 @@ def run_policy_gradient_experiment(
                     snapshot = {
                         "actor": {
                             name: value.detach().clone()
-                            for name, value in (agent.actor_model.state_dict().items())
+                            for name, value in (
+                                agent.actor_network.state_dict().items()
+                            )
                         },
                         "normalizer": normalizer.state_dict(),
                     }
-                    agent_critic_model = getattr(agent, "critic_model", None)
-                    if agent_critic_model is not None:
+                    agent_critic_network = getattr(agent, "critic_network", None)
+                    if agent_critic_network is not None:
                         snapshot["critic"] = {
                             name: value.detach().clone()
-                            for name, value in (agent_critic_model.state_dict().items())
+                            for name, value in (
+                                agent_critic_network.state_dict().items()
+                            )
                         }
                     recording_states.setdefault(seed, {})[checkpoint] = snapshot
                 if checkpoint == 100:
@@ -1138,7 +1136,7 @@ def run_policy_gradient_experiment(
             flush=True,
         )
         for checkpoint in config.recording_checkpoints:
-            recording_agent.actor_model.load_state_dict(
+            recording_agent.actor_network.load_state_dict(
                 recording_states[selected_seed][checkpoint]["actor"]
             )
             record_evaluation(

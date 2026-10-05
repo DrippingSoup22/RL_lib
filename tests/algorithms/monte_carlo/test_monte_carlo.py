@@ -7,8 +7,8 @@ from rl_lib.algorithms.monte_carlo import (
     FirstVisitMonteCarloControl,
     FirstVisitMonteCarloPrediction,
 )
-from rl_lib.data import Episode, EpisodeStep, discounted_returns
 from rl_lib.policies import epsilon_soft_probabilities, policy_from_action_values
+from rl_lib.trajectories import Episode, EpisodeStep, discounted_returns
 
 
 def repeated_state_episode() -> Episode[int]:
@@ -23,11 +23,8 @@ def repeated_state_episode() -> Episode[int]:
     )
 
 
-def test_discounted_returns_are_computed_backwards() -> None:
+def test_discounted_returns_are_computed_backwards_with_an_optional_bootstrap():
     np.testing.assert_allclose(discounted_returns([1, 2, 3], 0.5), [2.75, 3.5, 3])
-
-
-def test_discounted_returns_can_bootstrap_after_the_final_reward() -> None:
     np.testing.assert_allclose(
         discounted_returns([1, 2], 0.5, bootstrap=4.0),
         [3.0, 4.0],
@@ -60,13 +57,10 @@ def test_control_updates_q_and_improves_policy(
     np.testing.assert_allclose(control.policy.probabilities[0], [0.9, 0.1])
 
 
-def test_epsilon_soft_policy_splits_greedy_ties() -> None:
+def test_epsilon_soft_policy_splits_greedy_ties_and_can_be_greedy() -> None:
     np.testing.assert_allclose(
         epsilon_soft_probabilities([2.0, 2.0, 0.0], epsilon=0.3),
         [0.45, 0.45, 0.1],
     )
-
-
-def test_policy_from_action_values_can_be_greedy() -> None:
     policy = policy_from_action_values([[0.0, 1.0], [3.0, 2.0]], epsilon=0.0)
     np.testing.assert_allclose(policy.probabilities, [[0.0, 1.0], [1.0, 0.0]])

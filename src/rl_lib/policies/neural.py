@@ -7,14 +7,14 @@ import torch
 import torch.nn as nn
 from numpy.typing import ArrayLike
 
-from rl_lib.models import DiscretePolicyNetwork, GaussianPolicyNetwork
+from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 
 
 class CategoricalPolicy:
     """Categorical action policy backed by a discrete policy network."""
 
-    def __init__(self, model: DiscretePolicyNetwork) -> None:
-        self.model = model
+    def __init__(self, network: CategoricalPolicyNetwork) -> None:
+        self.network = network
 
     def sample(self, observation: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample actions and return their log-probabilities."""
@@ -37,13 +37,13 @@ class CategoricalPolicy:
 
     def deterministic_action(self, observation: torch.Tensor) -> torch.Tensor:
         """Return the action with the largest categorical preference."""
-        return torch.argmax(self.model(observation), dim=-1)
+        return torch.argmax(self.network(observation), dim=-1)
 
     def _distribution(
         self,
         observation: torch.Tensor,
     ) -> torch.distributions.Categorical:
-        return torch.distributions.Categorical(logits=self.model(observation))
+        return torch.distributions.Categorical(logits=self.network(observation))
 
 
 class SquashedGaussianPolicy:
@@ -51,14 +51,14 @@ class SquashedGaussianPolicy:
 
     def __init__(
         self,
-        model: GaussianPolicyNetwork,
+        network: GaussianPolicyNetwork,
         action_low: ArrayLike,
         action_high: ArrayLike,
     ) -> None:
 
         action_low_array = np.asarray(action_low, dtype=np.float32)
         action_high_array = np.asarray(action_high, dtype=np.float32)
-        expected_shape = (model.action_size,)
+        expected_shape = (network.action_size,)
         if action_low_array.shape != expected_shape:
             raise ValueError("action_low must contain one value per action component")
         if action_high_array.shape != expected_shape:
@@ -72,14 +72,14 @@ class SquashedGaussianPolicy:
                 "Each upper action bound must be greater than its lower bound"
             )
 
-        self.model = model
+        self.network = network
         scale = (action_high_array - action_low_array) / 2
         bias = (action_high_array + action_low_array) / 2
 
         self.scale = torch.as_tensor(scale, dtype=torch.float32)
         self.bias = torch.as_tensor(bias, dtype=torch.float32)
 
-    def _transform_action(
+    def _to_environment_action(
         self,
         latent_action: torch.Tensor,
     ) -> torch.Tensor:
@@ -96,7 +96,7 @@ class SquashedGaussianPolicy:
     ) -> torch.distributions.Normal:
         # The network defines one independent Normal distribution per action
         # component by predicting its mean and standard deviation.
-        mean, std = self.model(observation)
+        mean, std = self.network(observation)
         return torch.distributions.Normal(mean, std)
 
     def _log_probability(
@@ -163,8 +163,8 @@ class SquashedGaussianPolicy:
     ) -> torch.Tensor:
         # Deterministic deployment uses the distribution's center instead of a
         # random sample, then applies the same bounds as stochastic actions.
-        mean, _ = self.model(observation)
-        return self._transform_action(mean)
+        mean, _ = self.network(observation)
+        return self._to_environment_action(mean)
 
     def sample(
         self,
@@ -177,7 +177,7 @@ class SquashedGaussianPolicy:
         latent_action = distribution.sample()
 
         # Only the bounded and rescaled action is sent to the environment.
-        environment_action = self._transform_action(latent_action)
+        environment_action = self._to_environment_action(latent_action)
 
         # This remains differentiable through the distribution parameters, so a
         # policy-gradient loss can increase or decrease support for this action.

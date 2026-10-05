@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep, rollout_arrays
-from rl_lib.models import ActionValueNetwork
+from rl_lib.networks import ActionValueNetwork
 from rl_lib.policies import epsilon_soft_probabilities
+from rl_lib.trajectories import EpisodeStep, rollout_arrays
 
 
 class _SemiGradientControl:

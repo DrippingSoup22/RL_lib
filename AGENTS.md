@@ -22,8 +22,14 @@ Do not implement algorithms outside the user's current request.
   environment semantics, training, evaluation, and summaries in each family's
   runner.
 - Prefer direct implementations over speculative abstractions.
-- Add only small deterministic tests for update correctness, validation, and
-  environment compatibility. Do not unit-test dashboard or CSV plumbing.
+- Keep tests few, small, and deterministic: one test per behaviour an update
+  computes, one test per class for its constructor checks, and a Gymnasium
+  interaction test only where no experiment-runner test already drives that
+  agent on a real environment. Do not test per-call argument checks or
+  experiment plumbing: command-line options, defaults, seed presets, run
+  folders, dashboards, metrics, or CSV files.
+- After a change, run only the tests that cover it; run the whole suite at the
+  end of a piece of work.
 - Treat a multi-seed Gymnasium experiment as the end-to-end validation.
 - Run the relevant component tests before starting an end-to-end experiment.
 - The user runs tuning and standard experiments. The assistant may run only

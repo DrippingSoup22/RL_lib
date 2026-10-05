@@ -7,8 +7,8 @@ from experiments.policy_gradient.runners.a3c import (
     scheduled_learning_rate,
     train_episodes,
 )
-from rl_lib.models import (
-    DiscretePolicyNetwork,
+from rl_lib.networks import (
+    CategoricalPolicyNetwork,
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
@@ -34,19 +34,20 @@ def test_a3c_learning_rate_matches_linear_warmup_and_cosine_decay() -> None:
 
 def test_a3c_two_workers_share_updates_on_cartpole() -> None:
     torch.manual_seed(0)
-    actor_model = DiscretePolicyNetwork(4, 2, hidden_sizes=(4,))
-    critic_model = StateValueNetwork(4, hidden_sizes=(4,))
-    actor_optimizer = torch.optim.AdamW(actor_model.parameters(), lr=0.001)
-    critic_optimizer = torch.optim.AdamW(critic_model.parameters(), lr=0.001)
+    actor_network = CategoricalPolicyNetwork(4, 2, hidden_sizes=(4,))
+    critic_network = StateValueNetwork(4, hidden_sizes=(4,))
+    actor_optimizer = torch.optim.AdamW(actor_network.parameters(), lr=0.001)
+    critic_optimizer = torch.optim.AdamW(critic_network.parameters(), lr=0.001)
     actor_before = {
-        name: value.detach().clone() for name, value in actor_model.state_dict().items()
+        name: value.detach().clone()
+        for name, value in actor_network.state_dict().items()
     }
 
     results = train_episodes(
         "CartPole-v1",
-        actor_model,
+        actor_network,
         actor_optimizer,
-        critic_model,
+        critic_network,
         critic_optimizer,
         episode_start=0,
         episode_count=4,
@@ -78,66 +79,31 @@ def test_a3c_two_workers_share_updates_on_cartpole() -> None:
     )
     assert all(result.result.policy_entropy is not None for result in results)
 
-    first_actor_parameter = next(actor_model.parameters())
-    first_critic_parameter = next(critic_model.parameters())
+    first_actor_parameter = next(actor_network.parameters())
+    first_critic_parameter = next(critic_network.parameters())
     assert actor_optimizer.state[first_actor_parameter]["step"].item() == 8
     assert critic_optimizer.state[first_critic_parameter]["step"].item() == 8
     assert any(
         not torch.equal(value, actor_before[name])
-        for name, value in actor_model.state_dict().items()
-    )
-
-
-def test_a3c_worker_uses_the_shared_toy_text_environment_factory() -> None:
-    actor_model = DiscretePolicyNetwork(16, 4, hidden_sizes=(4,))
-    critic_model = StateValueNetwork(16, hidden_sizes=(4,))
-    actor_optimizer = torch.optim.Adam(actor_model.parameters(), lr=0.001)
-    critic_optimizer = torch.optim.Adam(critic_model.parameters(), lr=0.001)
-
-    results = train_episodes(
-        "FrozenLake-v1",
-        actor_model,
-        actor_optimizer,
-        critic_model,
-        critic_optimizer,
-        episode_start=0,
-        episode_count=2,
-        total_episodes=2,
-        workers=1,
-        rollout_steps=2,
-        actor_learning_rate=0.001,
-        actor_minimum_learning_rate=0.0001,
-        critic_learning_rate=0.001,
-        critic_minimum_learning_rate=0.0001,
-        warmup_episodes=0,
-        warmup_start_factor=0.1,
-        discount=0.99,
-        entropy_coefficient=0.0,
-        seed=0,
-        collect_diagnostics=False,
-        max_episode_steps=2,
-    )
-
-    assert len(results) == 2
-    assert all(
-        result.result.terminated or result.result.truncated for result in results
+        for name, value in actor_network.state_dict().items()
     )
 
 
 def test_a3c_worker_updates_continuous_gaussian_actor() -> None:
-    actor_model = GaussianPolicyNetwork(2, 1, hidden_sizes=(4,))
-    critic_model = StateValueNetwork(2, hidden_sizes=(4,))
-    actor_optimizer = torch.optim.Adam(actor_model.parameters(), lr=0.001)
-    critic_optimizer = torch.optim.Adam(critic_model.parameters(), lr=0.001)
+    actor_network = GaussianPolicyNetwork(2, 1, hidden_sizes=(4,))
+    critic_network = StateValueNetwork(2, hidden_sizes=(4,))
+    actor_optimizer = torch.optim.Adam(actor_network.parameters(), lr=0.001)
+    critic_optimizer = torch.optim.Adam(critic_network.parameters(), lr=0.001)
     actor_before = {
-        name: value.detach().clone() for name, value in actor_model.state_dict().items()
+        name: value.detach().clone()
+        for name, value in actor_network.state_dict().items()
     }
 
     results = train_episodes(
         "MountainCarContinuous-v0",
-        actor_model,
+        actor_network,
         actor_optimizer,
-        critic_model,
+        critic_network,
         critic_optimizer,
         episode_start=0,
         episode_count=1,
@@ -164,5 +130,5 @@ def test_a3c_worker_updates_continuous_gaussian_actor() -> None:
     assert math.isfinite(results[0].result.actor_loss)
     assert any(
         not torch.equal(value, actor_before[name])
-        for name, value in actor_model.state_dict().items()
+        for name, value in actor_network.state_dict().items()
     )

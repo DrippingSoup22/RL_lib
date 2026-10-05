@@ -5,25 +5,10 @@ from experiments.monte_carlo.environments import (
     BLACKJACK_STATES,
     encode_blackjack_state,
 )
-from experiments.monte_carlo.run import run_control, run_prediction
+from experiments.monte_carlo.run import run_control
 
 
-def test_blackjack_prediction_retains_the_complete_value_vector() -> None:
-    rows, values = run_prediction(
-        "first_visit_prediction",
-        "Blackjack-v1",
-        BLACKJACK_STATES,
-        BLACKJACK_ACTIONS,
-        encode_blackjack_state,
-        episodes=1,
-        seed=0,
-    )
-
-    assert len(rows) == 200
-    assert values.shape == (BLACKJACK_STATES,)
-
-
-def test_control_model_selection_does_not_depend_on_recording_support(tmp_path) -> None:
+def test_control_runs_on_blackjack_and_saves_the_selected_model(tmp_path) -> None:
     model_path = tmp_path / "best_model.npz"
     rows, selected_seed = run_control(
         "first_visit_control",

@@ -6,14 +6,14 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import EpisodeStep, rollout_arrays
-from rl_lib.models import (
-    DiscretePolicyNetwork,
+from rl_lib.networks import (
+    CategoricalPolicyNetwork,
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
-from rl_lib.optimizers import clip_gradients, validate_max_gradient_norm
+from rl_lib.optimization import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
+from rl_lib.trajectories import EpisodeStep, rollout_arrays
 
 
 class A2C:
@@ -21,9 +21,9 @@ class A2C:
 
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+        actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
-        critic_model: StateValueNetwork,
+        critic_network: StateValueNetwork,
         critic_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         entropy_coefficient: float = 0.0,
@@ -33,32 +33,32 @@ class A2C:
         action_high: ArrayLike | None = None,
     ) -> None:
 
-        if not actor_model.observation_size == critic_model.observation_size:
-            raise ValueError("Models must have the same observation size!")
+        if not actor_network.observation_size == critic_network.observation_size:
+            raise ValueError("Networks must have the same observation size!")
         if not np.isfinite(discount) or not 0 <= discount <= 1:
             raise ValueError("Discount must be finite and in [0, 1]!")
         if not np.isfinite(entropy_coefficient) or not entropy_coefficient >= 0:
             raise ValueError("Entropy coefficient must be finite and non negative!")
 
-        self.actor_model = actor_model
+        self.actor_network = actor_network
         self.actor_optimizer = actor_optimizer
-        self.critic_model = critic_model
+        self.critic_network = critic_network
         self.critic_optimizer = critic_optimizer
         self.discount = discount
         self.entropy_coefficient = entropy_coefficient
         self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
-        if isinstance(actor_model, DiscretePolicyNetwork):
+        if isinstance(actor_network, CategoricalPolicyNetwork):
             if action_low is not None or action_high is not None:
                 raise ValueError("Categorical A2C must not receive action bounds")
-            self.policy = CategoricalPolicy(actor_model)
-        elif isinstance(actor_model, GaussianPolicyNetwork):
+            self.policy = CategoricalPolicy(actor_network)
+        elif isinstance(actor_network, GaussianPolicyNetwork):
             if action_low is None or action_high is None:
                 raise ValueError("Continuous A2C requires both action bounds")
-            self.policy = SquashedGaussianPolicy(actor_model, action_low, action_high)
+            self.policy = SquashedGaussianPolicy(actor_network, action_low, action_high)
         else:
-            raise TypeError("Actor model must be discrete or Gaussian")
+            raise TypeError("Actor network must be categorical or Gaussian")
 
     def sample_action(
         self,
@@ -114,15 +114,15 @@ class A2C:
             arrays = rollout_arrays(
                 steps,
                 final_state,
-                observation_size=self.actor_model.observation_size,
-                number_of_actions=self.policy.model.number_of_actions,
+                observation_size=self.actor_network.observation_size,
+                number_of_actions=self.policy.network.number_of_actions,
             )
         else:
             arrays = rollout_arrays(
                 steps,
                 final_state,
-                observation_size=self.actor_model.observation_size,
-                action_size=self.policy.model.action_size,
+                observation_size=self.actor_network.observation_size,
+                action_size=self.policy.network.action_size,
             )
         return (
             torch.as_tensor(arrays.observations),
@@ -153,7 +153,7 @@ class A2C:
             if terminated:
                 running_return = rewards_tensor.new_zeros(())
             else:
-                running_return = self.critic_model(final_state_tensor)
+                running_return = self.critic_network(final_state_tensor)
 
             for index in range(len(rewards_tensor) - 1, -1, -1):
                 running_return = rewards_tensor[index] + self.discount * running_return
@@ -164,7 +164,7 @@ class A2C:
             policy_actions_tensor,
         )
 
-        values = self.critic_model(observations_tensor)
+        values = self.critic_network(observations_tensor)
         advantages = returns - values
 
         # The actor treats the advantage as a fixed learning signal; the critic
@@ -178,8 +178,8 @@ class A2C:
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
-        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
-        clip_gradients(self.critic_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.actor_network.parameters(), self.max_gradient_norm)
+        clip_gradients(self.critic_network.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 

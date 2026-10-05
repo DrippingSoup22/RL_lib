@@ -1,49 +1,54 @@
-import numpy as np
-from numpy.typing import ArrayLike, NDArray
+"""Generalized advantage estimation over a block of collected steps."""
+
+import torch
 
 
 def generalized_advantage_estimates(
-    rewards: ArrayLike,
-    values: ArrayLike,
-    final_value: float,
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    next_values: torch.Tensor,
     *,
-    terminated: bool,
+    terminated: torch.Tensor,
+    episode_ended: torch.Tensor,
     discount: float = 0.99,
     gae_lambda: float = 0.95,
-) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Advantages and return targets for ``T`` steps, shape ``(T, W)`` or ``(T,)``.
 
-    rewards_array = np.asarray(rewards, dtype=np.float32)
-    values_array = np.asarray(values, dtype=np.float32)
+    Rows are steps in time; columns, if any, are independent environments.
+    ``next_values`` is the critic's value of the state after each step: the
+    next row's value inside an episode, the final observation's value at a
+    time limit, and the next observation's value on the last row. On
+    ``terminated`` rows it is ignored, since nothing follows the end of the
+    task. ``episode_ended`` marks termination or time limit: the next row
+    belongs to a new episode, so its advantage is not carried back.
+    """
+    if not 0 <= discount <= 1:
+        raise ValueError("Discount must be in [0, 1]")
+    if not 0 <= gae_lambda <= 1:
+        raise ValueError("GAE lambda must be in [0, 1]")
+    inputs = (rewards, values, next_values, terminated, episode_ended)
+    if len({tensor.shape for tensor in inputs}) != 1:
+        raise ValueError("All inputs must have the same shape")
 
-    if rewards_array.ndim != 1 or values_array.ndim != 1:
-        raise ValueError("Rewards and values must be one-dimensional")
-    if len(rewards_array) == 0 or len(values_array) == 0:
-        raise ValueError("Rewards and values must be non empty!")
-    if not len(rewards_array) == len(values_array):
-        raise ValueError("Rewards and values must have the same length!")
-    if not np.all(np.isfinite(rewards_array)):
-        raise ValueError("All rewards must be finite!")
-    if not np.all(np.isfinite(values_array)):
-        raise ValueError("All values must be finite!")
-    if not np.isfinite(final_value):
-        raise ValueError("Final value must be finite!")
-    if not np.isfinite(discount) or not 0 <= discount <= 1:
-        raise ValueError("Discount must be finite and in [0, 1]!")
-    if not np.isfinite(gae_lambda) or not 0 <= gae_lambda <= 1:
-        raise ValueError("Gae lambda must be finite and in [0, 1]!")
-
-    advantages = np.zeros_like(rewards_array, dtype=np.float32)
-    next_value = 0 if terminated else final_value
+    advantages = torch.zeros_like(rewards)
     next_advantage = 0
+    terminated = terminated.float()
+    episode_ended = episode_ended.float()
 
-    for index in range(len(rewards_array) - 1, -1, -1):
-        delta = rewards_array[index] + discount * next_value - values_array[index]
-        current_advantage = delta + discount * gae_lambda * next_advantage
+    # Backwards, so that each step's advantage can add the next step's one.
+    for row in range(rewards.shape[0] - 1, -1, -1):
+        td_error = (
+            rewards[row]
+            + discount * (1 - terminated[row]) * next_values[row]
+            - values[row]
+        )
+        advantage = (
+            td_error + discount * gae_lambda * (1 - episode_ended[row]) * next_advantage
+        )
 
-        advantages[index] = current_advantage
-        next_value = values_array[index]
-        next_advantage = current_advantage
+        advantages[row] = advantage
+        next_advantage = advantage
 
-    return_targets = advantages + values_array
-
+    return_targets = advantages + values
     return advantages, return_targets

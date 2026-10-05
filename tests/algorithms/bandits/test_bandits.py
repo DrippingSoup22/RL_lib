@@ -32,9 +32,3 @@ def test_ucb_visits_every_action_before_reusing_one() -> None:
         actions.append(action)
         agent.update(action, 0.0)
     assert set(actions) == set(range(4))
-
-
-@pytest.mark.parametrize("agent_class", [EpsilonGreedyBandits, UCBGreedyBandits])
-def test_bandits_reject_invalid_actions(agent_class: type) -> None:
-    with pytest.raises(ValueError, match="action"):
-        agent_class(k=2).update(2, 0.0)

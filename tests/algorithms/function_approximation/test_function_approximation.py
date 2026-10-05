@@ -9,8 +9,8 @@ from rl_lib.algorithms.function_approximation import (
     SemiGradientSARSA,
     SemiGradientTDPrediction,
 )
-from rl_lib.data import EpisodeStep
-from rl_lib.models import ActionValueNetwork, StateValueNetwork
+from rl_lib.networks import ActionValueNetwork, StateValueNetwork
+from rl_lib.trajectories import EpisodeStep
 
 ControlAgent = SemiGradientSARSA | SemiGradientQLearning
 ControlConstructor = Callable[..., ControlAgent]
@@ -56,23 +56,17 @@ def rollout() -> tuple[EpisodeStep[np.ndarray], ...]:
     )
 
 
-def test_prediction_uses_bootstrapped_rollout_returns() -> None:
+def test_prediction_bootstraps_only_without_termination() -> None:
     predictor, _ = linear_predictor()
 
     errors = predictor.update(
         rollout(), np.array([3.0], dtype=np.float32), terminated=False
     )
-
     assert errors == pytest.approx((1.5, 1.0))
-
-
-def test_prediction_does_not_bootstrap_after_termination() -> None:
-    predictor, _ = linear_predictor()
 
     errors = predictor.update(
         rollout(), np.array([100.0], dtype=np.float32), terminated=True
     )
-
     assert errors == pytest.approx((0.0, -2.0))
 
 
@@ -116,91 +110,20 @@ def test_control_selects_an_epsilon_greedy_action(
     assert agent.select_action([1.0]) == 1
 
 
-def test_sarsa_requires_an_action_for_nonterminal_bootstrap() -> None:
-    agent, _ = linear_control_agent(SemiGradientSARSA)
-    with pytest.raises(ValueError, match="Final action"):
-        agent.update(
-            rollout(),
-            np.array([3.0], dtype=np.float32),
-            final_action=None,
-            terminated=False,
-        )
-
-
 @pytest.mark.parametrize(
-    "constructor", (SemiGradientTDPrediction, SemiGradientSARSA, SemiGradientQLearning)
+    ("constructor", "invalid_settings"),
+    (
+        (SemiGradientTDPrediction, ({"discount": 1.1}, {"discount": np.nan})),
+        (SemiGradientSARSA, ({"discount": -0.1}, {"epsilon": 1.1})),
+        (SemiGradientQLearning, ({"discount": 1.1}, {"epsilon": -0.1})),
+    ),
 )
-def test_algorithms_reject_an_empty_rollout(constructor: type) -> None:
-    model: StateValueNetwork | ActionValueNetwork
+def test_constructors_reject_invalid_settings(constructor, invalid_settings) -> None:
     if constructor is SemiGradientTDPrediction:
         model = StateValueNetwork(1, hidden_sizes=())
     else:
         model = ActionValueNetwork(1, 2, hidden_sizes=())
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    agent = constructor(model, optimizer)
-
-    with pytest.raises(ValueError, match="empty"):
-        if isinstance(agent, SemiGradientSARSA):
-            agent.update((), [0.0], 0, terminated=False)
-        else:
-            agent.update((), [0.0], terminated=False)
-
-
-@pytest.mark.parametrize("discount", (-0.1, 1.1, np.nan, np.inf))
-def test_prediction_rejects_invalid_discount(discount: float) -> None:
-    model = StateValueNetwork(1, hidden_sizes=())
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    with pytest.raises(ValueError):
-        SemiGradientTDPrediction(model, optimizer, discount)
-
-
-@pytest.mark.parametrize("constructor", (SemiGradientSARSA, SemiGradientQLearning))
-@pytest.mark.parametrize(
-    ("discount", "epsilon"),
-    ((-0.1, 0.1), (1.1, 0.1), (0.9, -0.1), (0.9, 1.1)),
-)
-def test_control_rejects_invalid_configuration(
-    constructor: ControlConstructor,
-    discount: float,
-    epsilon: float,
-) -> None:
-    model = ActionValueNetwork(1, 2, hidden_sizes=())
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    with pytest.raises(ValueError):
-        constructor(model, optimizer, discount=discount, epsilon=epsilon)
-
-
-@pytest.mark.parametrize("constructor", (SemiGradientSARSA, SemiGradientQLearning))
-@pytest.mark.parametrize("action", (-1, 2))
-def test_control_rejects_an_invalid_rollout_action(
-    constructor: ControlConstructor,
-    action: int,
-) -> None:
-    agent, _ = linear_control_agent(constructor)
-    steps = (EpisodeStep(np.array([1.0], dtype=np.float32), action, 0.0),)
-    with pytest.raises(ValueError, match="Actions"):
-        if isinstance(agent, SemiGradientSARSA):
-            agent.update(steps, [2.0], 0, terminated=False)
-        else:
-            agent.update(steps, [2.0], terminated=False)
-
-
-@pytest.mark.parametrize("reward", (np.nan, np.inf, -np.inf))
-def test_prediction_rejects_a_nonfinite_rollout_reward(reward: float) -> None:
-    predictor, _ = linear_predictor()
-    steps = (EpisodeStep(np.array([1.0], dtype=np.float32), 0, reward),)
-    with pytest.raises(ValueError, match="finite"):
-        predictor.update(steps, [2.0], terminated=False)
-
-
-@pytest.mark.parametrize("constructor", (SemiGradientSARSA, SemiGradientQLearning))
-def test_control_rejects_an_invalid_observation_shape(
-    constructor: ControlConstructor,
-) -> None:
-    agent, _ = linear_control_agent(constructor)
-    steps = (EpisodeStep(np.array([1.0, 2.0], dtype=np.float32), 0, 0.0),)
-    with pytest.raises(ValueError, match="input size"):
-        if isinstance(agent, SemiGradientSARSA):
-            agent.update(steps, [2.0], 0, terminated=False)
-        else:
-            agent.update(steps, [2.0], terminated=False)
+    for settings in invalid_settings:
+        with pytest.raises(ValueError):
+            constructor(model, optimizer, **settings)

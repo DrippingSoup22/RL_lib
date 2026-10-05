@@ -4,14 +4,14 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from rl_lib.data import Episode, discounted_returns, rollout_arrays
-from rl_lib.models import (
-    DiscretePolicyNetwork,
+from rl_lib.networks import (
+    CategoricalPolicyNetwork,
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
-from rl_lib.optimizers import clip_gradients, validate_max_gradient_norm
+from rl_lib.optimization import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
+from rl_lib.trajectories import Episode, discounted_returns, rollout_arrays
 
 
 class Reinforce:
@@ -19,7 +19,7 @@ class Reinforce:
 
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+        actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         *,
@@ -31,26 +31,26 @@ class Reinforce:
         if not np.isfinite(discount) or not 0 <= discount <= 1:
             raise ValueError("Discount must be finite and in [0, 1]!")
 
-        self.actor_model = actor_model
+        self.actor_network = actor_network
         self.actor_optimizer = actor_optimizer
         self.discount = discount
         self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
 
-        if isinstance(actor_model, DiscretePolicyNetwork):
+        if isinstance(actor_network, CategoricalPolicyNetwork):
             if action_low is not None or action_high is not None:
                 raise ValueError(
                     "Categorical REINFORCE must not receive continuous action bounds"
                 )
-            self.policy = CategoricalPolicy(actor_model)
-        elif isinstance(actor_model, GaussianPolicyNetwork):
+            self.policy = CategoricalPolicy(actor_network)
+        elif isinstance(actor_network, GaussianPolicyNetwork):
             if action_low is None or action_high is None:
                 raise ValueError(
                     "Continuous REINFORCE requires lower and upper action bounds"
                 )
-            self.policy = SquashedGaussianPolicy(actor_model, action_low, action_high)
+            self.policy = SquashedGaussianPolicy(actor_network, action_low, action_high)
         else:
-            raise TypeError("Actor model must be discrete or Gaussian")
+            raise TypeError("Actor network must be categorical or Gaussian")
 
     def sample_action(
         self,
@@ -102,15 +102,15 @@ class Reinforce:
             arrays = rollout_arrays(
                 episode.steps,
                 episode.final_state,
-                observation_size=self.actor_model.observation_size,
-                number_of_actions=self.policy.model.number_of_actions,
+                observation_size=self.actor_network.observation_size,
+                number_of_actions=self.policy.network.number_of_actions,
             )
         else:
             arrays = rollout_arrays(
                 episode.steps,
                 episode.final_state,
-                observation_size=self.actor_model.observation_size,
-                action_size=self.policy.model.action_size,
+                observation_size=self.actor_network.observation_size,
+                action_size=self.policy.network.action_size,
             )
         returns = discounted_returns(arrays.rewards, self.discount)
         return (
@@ -141,7 +141,7 @@ class Reinforce:
 
         self.actor_optimizer.zero_grad()
         loss.backward()
-        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.actor_network.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
 
         return float(loss.item())
@@ -152,9 +152,9 @@ class ReinforceWithBaseline(Reinforce):
 
     def __init__(
         self,
-        actor_model: DiscretePolicyNetwork | GaussianPolicyNetwork,
+        actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
-        critic_model: StateValueNetwork,
+        critic_network: StateValueNetwork,
         critic_optimizer: torch.optim.Optimizer,
         discount: float = 1.0,
         *,
@@ -164,7 +164,7 @@ class ReinforceWithBaseline(Reinforce):
     ) -> None:
 
         super().__init__(
-            actor_model,
+            actor_network,
             actor_optimizer,
             discount,
             max_gradient_norm=max_gradient_norm,
@@ -172,11 +172,11 @@ class ReinforceWithBaseline(Reinforce):
             action_high=action_high,
         )
 
-        if actor_model.observation_size != critic_model.observation_size:
+        if actor_network.observation_size != critic_network.observation_size:
             raise ValueError(
-                "Policy and value models must use the same observation size"
+                "Policy and value networks must use the same observation size"
             )
-        self.critic_model = critic_model
+        self.critic_network = critic_network
         self.critic_optimizer = critic_optimizer
 
     def update(
@@ -193,7 +193,7 @@ class ReinforceWithBaseline(Reinforce):
             policy_actions_tensor,
         )
 
-        values = self.critic_model(observations_tensor)
+        values = self.critic_network(observations_tensor)
         # The baseline reduces variance but is held fixed during the actor step.
         advantages = returns_tensor - values.detach()
 
@@ -211,8 +211,8 @@ class ReinforceWithBaseline(Reinforce):
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
-        clip_gradients(self.actor_model.parameters(), self.max_gradient_norm)
-        clip_gradients(self.critic_model.parameters(), self.max_gradient_norm)
+        clip_gradients(self.actor_network.parameters(), self.max_gradient_norm)
+        clip_gradients(self.critic_network.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
