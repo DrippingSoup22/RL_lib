@@ -79,12 +79,19 @@ def test_saved_state_is_a_copy_and_restores_the_same_normalizer() -> None:
 
     state = normalizer.state_dict()
     normalizer.normalize(data[5:], update_statistics=True)
-    restored = ObservationNormalizer.from_state_dict(state)
+    restored = ObservationNormalizer(3, "running")
+    restored.load_state_dict(state)
     restored.normalize(data[5:], update_statistics=True)
 
     assert state["observation_count"] == 5  # unchanged by the later update
     assert restored.observation_count == normalizer.observation_count
     torch.testing.assert_close(restored.normalize(data), normalizer.normalize(data))
+    # A new normaliser can also be built from the state alone.
+    assert ObservationNormalizer.from_state_dict(state).observation_count == 5
+    # Statistics only fit a normaliser of the same size and mode.
+    for other in (ObservationNormalizer(4, "running"), ObservationNormalizer(3)):
+        with pytest.raises(ValueError):
+            other.load_state_dict(state)
 
 
 def test_constructor_rejects_invalid_settings() -> None:

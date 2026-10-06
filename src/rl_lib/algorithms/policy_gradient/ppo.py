@@ -1,10 +1,11 @@
 """Clipped proximal policy optimization, on batches of tensors."""
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
-from numpy.typing import ArrayLike
 
 from rl_lib.networks import (
     CategoricalPolicyNetwork,
@@ -34,22 +35,32 @@ class PPOActionSample:
 
 @dataclass(frozen=True)
 class PPOUpdateSummary:
-    """The means, over all minibatches of one update, of their measurements."""
+    """How one update went.
+
+    The first five values are means over all minibatches of the update.
+    ``explained_variance`` describes the critic that collected the batch,
+    before the update: ``1 - Var(return_targets - values) / Var(return_targets)``
+    over the batch. It is 1 when the values predicted the return targets
+    exactly, 0 when they explained none of their variation, negative when they
+    did worse than predicting the mean, and NaN when every return target is the
+    same.
+    """
 
     actor_loss: float
     critic_loss: float
     entropy: float
     approximate_kl: float
     clip_fraction: float
+    explained_variance: float
 
 
 class PPO:
     """PPO with a separate actor and critic, for categorical or bounded actions.
 
     Everything works on batches of tensors on the networks' device: the caller
-    moves the networks there before creating their optimizers, and passes
-    observations and stored data already on it. Nothing is converted to Python
-    numbers inside a loop, so a GPU is never kept waiting.
+    moves the networks there before creating their optimizers and this PPO, and
+    passes observations and stored data already on it. Nothing makes the CPU
+    wait for the GPU, except reading the summary once at the end of an update.
     """
 
     def __init__(
@@ -60,17 +71,19 @@ class PPO:
         critic_optimizer: torch.optim.Optimizer,
         clip_ratio: float = 0.2,
         entropy_coefficient: float = 0.0,
-        shuffle_seed: int | None = None,
+        seed: int | None = None,
         *,
         max_gradient_norm: float | None = None,
-        action_low: ArrayLike | None = None,
-        action_high: ArrayLike | None = None,
+        action_low: torch.Tensor | Sequence[float] | None = None,
+        action_high: torch.Tensor | Sequence[float] | None = None,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
-        ``shuffle_seed`` fixes the order in which minibatches are drawn; without
-        it the order is random. Continuous actors need ``action_low`` and
-        ``action_high``; categorical actors must not get them.
+        ``seed`` starts ``generator``, the one source of everything random this
+        PPO does: sampling actions, estimating the continuous entropy, and
+        shuffling minibatches. Without it the generator starts from a random
+        seed. Continuous actors need ``action_low`` and ``action_high``;
+        categorical actors must not get them.
         """
         if actor_network.observation_size != critic_network.observation_size:
             raise ValueError("Actor and critic networks must have the same input size")
@@ -87,26 +100,28 @@ class PPO:
         self.entropy_coefficient = entropy_coefficient
         self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
 
-        # The networks' device is where all data must be, and where the
-        # minibatch order is drawn.
+        # The networks' device is where all data must be, and where every
+        # random number is drawn.
         self.device = next(actor_network.parameters()).device
-        self.shuffle_generator = torch.Generator(device=self.device)
-        if shuffle_seed is None:
-            self.shuffle_generator.seed()
+        self.generator = torch.Generator(device=self.device)
+        if seed is None:
+            self.generator.seed()
         else:
-            self.shuffle_generator.manual_seed(shuffle_seed)
+            self.generator.manual_seed(seed)
 
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
         if isinstance(actor_network, CategoricalPolicyNetwork):
             if action_low is not None or action_high is not None:
                 raise ValueError("Categorical PPO must not receive action bounds")
-            self.policy = CategoricalPolicy(actor_network)
+            self.policy = CategoricalPolicy(actor_network, generator=self.generator)
         elif isinstance(actor_network, GaussianPolicyNetwork):
             if action_low is None or action_high is None:
                 raise ValueError(
                     "Continuous PPO requires lower and upper action bounds"
                 )
-            self.policy = SquashedGaussianPolicy(actor_network, action_low, action_high)
+            self.policy = SquashedGaussianPolicy(
+                actor_network, action_low, action_high, generator=self.generator
+            )
         else:
             raise TypeError("Actor network must be categorical or Gaussian")
 
@@ -196,6 +211,16 @@ class PPO:
         ):
             raise ValueError("Every input must hold the same nonzero number of samples")
 
+        # How well the critic that collected the batch predicted its returns.
+        # Return targets are advantages plus values, so the part the values
+        # left unexplained is the advantages, taken before normalisation.
+        return_target_variance = return_targets.var(correction=0)
+        explained_variance = torch.where(
+            return_target_variance > 0,
+            1 - advantages.var(correction=0) / return_target_variance,
+            math.nan,
+        )
+
         # Normalize once over the full batch, never independently per minibatch.
         # Nearly constant advantages are kept as they are rather than divided
         # by almost zero; torch.where makes that choice on the device.
@@ -212,7 +237,7 @@ class PPO:
         for _ in range(update_epochs):
             # Every epoch uses every transition once, in a new random order.
             shuffled_indices = torch.randperm(
-                batch_size, generator=self.shuffle_generator, device=self.device
+                batch_size, generator=self.generator, device=self.device
             )
             for minibatch_start in range(0, batch_size, minibatch_size):
                 minibatch_indices = shuffled_indices[
@@ -228,7 +253,41 @@ class PPO:
                 minibatch_count += 1
 
         # The only conversion to Python numbers: once, after all minibatches.
-        return PPOUpdateSummary(*(measurement_totals / minibatch_count).tolist())
+        summary = torch.cat(
+            (measurement_totals / minibatch_count, explained_variance.reshape(1))
+        )
+        return PPOUpdateSummary(*summary.tolist())
+
+    def state_dict(self) -> dict[str, Any]:
+        """Everything training changes, for checkpoints.
+
+        Both networks, both optimizers, and the random generator. As with
+        PyTorch's own ``state_dict``, the tensors are the live ones: save the
+        result right away, or copy it. The settings are not included; restore
+        into a PPO built with the same settings and network sizes.
+        """
+        return {
+            "actor_network": self.actor_network.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_network": self.critic_network.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "generator": self.generator.get_state(),
+            "generator_device_type": self.device.type,
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Restore what ``state_dict`` saved, onto this PPO's device.
+
+        The generator is restored only if it was saved on the same kind of
+        device: CPU and CUDA generators draw different sequences, so on another
+        device it keeps the sequence this PPO was created with.
+        """
+        self.actor_network.load_state_dict(state["actor_network"])
+        self.actor_optimizer.load_state_dict(state["actor_optimizer"])
+        self.critic_network.load_state_dict(state["critic_network"])
+        self.critic_optimizer.load_state_dict(state["critic_optimizer"])
+        if state["generator_device_type"] == self.device.type:
+            self.generator.set_state(state["generator"].cpu())
 
     def _update_minibatch(
         self,
@@ -240,9 +299,9 @@ class PPO:
     ) -> torch.Tensor:
         """Take one clipped actor step and one critic step on a minibatch.
 
-        Returns the five measurements, in the order of ``PPOUpdateSummary``'s
-        fields, as one detached tensor of five values, so that ``update`` can
-        add them up on the device without waiting for it.
+        Returns the five minibatch measurements, in the order of the first five
+        fields of ``PPOUpdateSummary``, as one detached tensor, so that
+        ``update`` can add them up on the device without waiting for it.
         """
 
         # Re-evaluate the collected actions under the current, changing policy.

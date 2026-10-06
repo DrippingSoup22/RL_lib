@@ -1,6 +1,7 @@
 """Policy networks for categorical and continuous action spaces."""
 
-import numpy as np
+import math
+
 import torch
 import torch.nn as nn
 
@@ -61,7 +62,7 @@ class GaussianPolicyNetwork(nn.Module):
             raise ValueError("Action size must be greater than 0")
         if any(hidden_size <= 0 for hidden_size in hidden_sizes):
             raise ValueError("All hidden sizes must be greater than 0")
-        if not np.isfinite(initial_std) or initial_std <= 0:
+        if not math.isfinite(initial_std) or initial_std <= 0:
             raise ValueError("Initial std must be finite and greater than 0")
         if std_mode not in ("state_dependent", "global"):
             raise ValueError("std_mode must be 'state_dependent' or 'global'")
@@ -94,14 +95,14 @@ class GaussianPolicyNetwork(nn.Module):
 
             log_std_output = nn.Linear(std_input_size, action_size)
             nn.init.zeros_(log_std_output.weight)
-            nn.init.constant_(log_std_output.bias, float(np.log(initial_std)))
+            nn.init.constant_(log_std_output.bias, math.log(initial_std))
             log_std_layers.append(log_std_output)
             self.log_std_network = nn.Sequential(*log_std_layers)
             self.log_std = None
         else:
             self.log_std_network = None
             self.log_std = nn.Parameter(
-                torch.full((action_size,), float(np.log(initial_std)))
+                torch.full((action_size,), math.log(initial_std))
             )
 
     def forward(

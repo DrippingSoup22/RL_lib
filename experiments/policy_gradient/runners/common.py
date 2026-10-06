@@ -1,6 +1,7 @@
 """Small data and interaction helpers shared by policy-gradient backends."""
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -33,6 +34,20 @@ class TrainingEpisodeResult:
     policy_entropy: float | None
     approximate_kl: float | None = None
     clip_fraction: float | None = None
+
+
+@contextmanager
+def seeded_actions(agent: PolicyAgent, action_seed: int) -> Iterator[None]:
+    """Make the actions drawn inside the block repeat for the same seed.
+
+    PPO draws from its own generator; the other algorithms draw from PyTorch's
+    global one, which is restored afterwards.
+    """
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(action_seed)
+        if isinstance(agent, PPO):
+            agent.generator.manual_seed(action_seed)
+        yield
 
 
 def observation_array(observation: object, observation_size: int) -> Observation:
@@ -84,8 +99,7 @@ def generate_episode(
     steps: list[EpisodeStep[Observation]] = []
     terminated = truncated = False
 
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(action_seed)
+    with seeded_actions(agent, action_seed):
         while not (terminated or truncated):
             if deterministic or isinstance(agent, PPO):
                 # PPO has a separate frozen-batch collector; this shared path is

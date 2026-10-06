@@ -1,11 +1,17 @@
-"""Policies backed by neural-network distribution parameters."""
+"""Policies backed by neural-network distribution parameters.
+
+Both policies draw their random numbers from the ``generator`` they are given,
+so that an algorithm can own its random sequence; without one they use
+PyTorch's global generator. Their distributions skip PyTorch's argument checks:
+each check reads a GPU value on the CPU, which makes the CPU wait for the GPU on
+every call. Callers check results once instead, for example an update's losses.
+"""
 
 import math
+from collections.abc import Sequence
 
-import numpy as np
 import torch
 import torch.nn as nn
-from numpy.typing import ArrayLike
 
 from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 
@@ -13,13 +19,23 @@ from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 class CategoricalPolicy:
     """Categorical action policy backed by a discrete policy network."""
 
-    def __init__(self, network: CategoricalPolicyNetwork) -> None:
+    def __init__(
+        self,
+        network: CategoricalPolicyNetwork,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> None:
         self.network = network
+        self.generator = generator
 
     def sample(self, observation: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample actions and return their log-probabilities."""
         distribution = self._distribution(observation)
-        action = distribution.sample()
+        # The same draw as Categorical.sample, but from this policy's generator.
+        probabilities = distribution.probs.reshape(-1, self.network.number_of_actions)
+        action = torch.multinomial(
+            probabilities, 1, replacement=True, generator=self.generator
+        ).reshape(distribution.batch_shape)
         return action, distribution.log_prob(action)
 
     def evaluate_actions(
@@ -43,41 +59,49 @@ class CategoricalPolicy:
         self,
         observation: torch.Tensor,
     ) -> torch.distributions.Categorical:
-        return torch.distributions.Categorical(logits=self.network(observation))
+        return torch.distributions.Categorical(
+            logits=self.network(observation), validate_args=False
+        )
 
 
 class SquashedGaussianPolicy:
-    """Bound a diagonal Gaussian policy to a finite continuous action space."""
+    """Bound a diagonal Gaussian policy to a finite continuous action space.
+
+    Create it after moving the network to its device: the action scale and bias
+    are placed on that device once, here.
+    """
 
     def __init__(
         self,
         network: GaussianPolicyNetwork,
-        action_low: ArrayLike,
-        action_high: ArrayLike,
+        action_low: torch.Tensor | Sequence[float],
+        action_high: torch.Tensor | Sequence[float],
+        *,
+        generator: torch.Generator | None = None,
     ) -> None:
-
-        action_low_array = np.asarray(action_low, dtype=np.float32)
-        action_high_array = np.asarray(action_high, dtype=np.float32)
+        # The bounds come from outside, usually an environment's action space,
+        # so they are checked once, here, on the CPU.
+        low = torch.as_tensor(action_low, dtype=torch.float32, device="cpu")
+        high = torch.as_tensor(action_high, dtype=torch.float32, device="cpu")
         expected_shape = (network.action_size,)
-        if action_low_array.shape != expected_shape:
+        if low.shape != expected_shape:
             raise ValueError("action_low must contain one value per action component")
-        if action_high_array.shape != expected_shape:
+        if high.shape != expected_shape:
             raise ValueError("action_high must contain one value per action component")
-        if not np.all(np.isfinite(action_low_array)) or not np.all(
-            np.isfinite(action_high_array)
-        ):
+        if not (torch.isfinite(low).all() and torch.isfinite(high).all()):
             raise ValueError("Action bounds must be finite")
-        if np.any(action_high_array <= action_low_array):
+        if torch.any(high <= low):
             raise ValueError(
                 "Each upper action bound must be greater than its lower bound"
             )
 
         self.network = network
-        scale = (action_high_array - action_low_array) / 2
-        bias = (action_high_array + action_low_array) / 2
-
-        self.scale = torch.as_tensor(scale, dtype=torch.float32)
-        self.bias = torch.as_tensor(bias, dtype=torch.float32)
+        self.generator = generator
+        device = next(network.parameters()).device
+        self.scale = ((high - low) / 2).to(device)
+        self.bias = ((high + low) / 2).to(device)
+        # The density correction for scaling [-1, 1] to the bounds never changes.
+        self.log_scale = torch.log(self.scale)
 
     def _to_environment_action(
         self,
@@ -85,10 +109,7 @@ class SquashedGaussianPolicy:
     ) -> torch.Tensor:
         # First map the unbounded Gaussian sample into the normalized range
         # [-1, 1], then map that range into each environment action bound.
-        normalized_action = torch.tanh(latent_action)
-        scale = self.scale.to(latent_action)
-        bias = self.bias.to(latent_action)
-        return scale * normalized_action + bias
+        return self.scale * torch.tanh(latent_action) + self.bias
 
     def _distribution(
         self,
@@ -97,7 +118,22 @@ class SquashedGaussianPolicy:
         # The network defines one independent Normal distribution per action
         # component by predicting its mean and standard deviation.
         mean, std = self.network(observation)
-        return torch.distributions.Normal(mean, std)
+        return torch.distributions.Normal(mean, std, validate_args=False)
+
+    def _draw_latent_action(
+        self,
+        distribution: torch.distributions.Normal,
+    ) -> torch.Tensor:
+        # The mean plus the spread times standard normal noise from this
+        # policy's generator. Written this way, the draw stays differentiable
+        # through the mean and spread, like Normal.rsample.
+        noise = torch.randn(
+            distribution.loc.shape,
+            dtype=distribution.loc.dtype,
+            device=distribution.loc.device,
+            generator=self.generator,
+        )
+        return distribution.loc + distribution.scale * noise
 
     def _log_probability(
         self,
@@ -114,12 +150,7 @@ class SquashedGaussianPolicy:
         )
 
         # Correct once more for scaling [-1, 1] to the environment's bounds.
-        scale = self.scale.to(latent_action)
-        log_scale_jacobian = torch.log(scale)
-
-        component_log_probabilities = (
-            base_log_prob - log_tanh_jacobian - log_scale_jacobian
-        )
+        component_log_probabilities = base_log_prob - log_tanh_jacobian - self.log_scale
 
         # The components form one joint action. Their densities multiply, so
         # their log-densities add to one value per observation.
@@ -130,10 +161,10 @@ class SquashedGaussianPolicy:
         distribution: torch.distributions.Normal,
     ) -> torch.Tensor:
         # The entropy after tanh has no simple closed-form expression. Estimate
-        # it with one fresh action sampled from the current distribution.
-        # rsample() keeps the sample differentiable so entropy regularization can
-        # update both the means and standard deviations of the policy.
-        latent_action = distribution.rsample()
+        # it with one fresh action sampled from the current distribution. The
+        # draw keeps gradients, so entropy regularization can update both the
+        # means and standard deviations of the policy.
+        latent_action = self._draw_latent_action(distribution)
         return -self._log_probability(distribution, latent_action)
 
     def evaluate_actions(
@@ -172,9 +203,10 @@ class SquashedGaussianPolicy:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         distribution = self._distribution(observation)
 
-        # Keep the raw sample for stable probability evaluation. sample(), unlike
-        # rsample(), intentionally does not differentiate through random choice.
-        latent_action = distribution.sample()
+        # Keep the raw sample for stable probability evaluation. It is detached,
+        # like Normal.sample: the sampled action is data, not a function of the
+        # network.
+        latent_action = self._draw_latent_action(distribution).detach()
 
         # Only the bounded and rescaled action is sent to the environment.
         environment_action = self._to_environment_action(latent_action)

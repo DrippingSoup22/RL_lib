@@ -47,6 +47,7 @@ from experiments.policy_gradient.runners.common import (
     TrainingEpisodeResult,
     generate_episode,
     observation_array,
+    seeded_actions,
     select_environment_action,
 )
 from experiments.policy_gradient.runners.ppo import PPOTrainingBatchResult
@@ -209,7 +210,7 @@ def make_agent(
                 critic_optimizer,
                 clip_ratio=ppo_clip_ratio,
                 entropy_coefficient=entropy_coefficient,
-                shuffle_seed=seed,
+                seed=seed,
                 max_gradient_norm=max_gradient_norm,
                 action_low=action_low,
                 action_high=action_high,
@@ -370,8 +371,7 @@ def record_evaluation(
         durations.append(100)
         terminated = truncated = False
         step = 0
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(action_seed)
+        with seeded_actions(agent, action_seed):
             while not (terminated or truncated):
                 action = select_environment_action(
                     agent,

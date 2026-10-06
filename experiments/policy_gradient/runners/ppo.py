@@ -1,4 +1,3 @@
-import dataclasses
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from experiments.policy_gradient.runners.common import (
     Observation,
     environment_action,
     observation_array,
+    seeded_actions,
 )
 from rl_lib.algorithms.policy_gradient import (
     PPO,
@@ -80,8 +80,7 @@ def train_episodes(
         episode_rewards: list[float] = []
         episode_values: list[torch.Tensor] = []
 
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(action_seed)
+        with seeded_actions(agent, action_seed):
             while not (terminated or truncated):
                 sample = agent.sample_action(as_batch(state))
                 next_observation, reward, terminated, truncated, _ = env.step(
@@ -150,7 +149,16 @@ def train_episodes(
         update_epochs=update_epochs,
         minibatch_size=minibatch_size,
     )
-    if not all(math.isfinite(value) for value in dataclasses.astuple(summary)):
+    # The explained variance is left out: it is NaN whenever every return
+    # target in the batch is the same.
+    minibatch_means = (
+        summary.actor_loss,
+        summary.critic_loss,
+        summary.entropy,
+        summary.approximate_kl,
+        summary.clip_fraction,
+    )
+    if not all(math.isfinite(value) for value in minibatch_means):
         raise RuntimeError("PPO produced a non-finite update result")
 
     return PPOTrainingBatchResult(

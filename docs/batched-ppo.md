@@ -67,7 +67,7 @@ Names for the rewritten parts:
 
 | Before | After | Why |
 | --- | --- | --- |
-| PPO `seed`, `rng` | `shuffle_seed`, `shuffle_generator` | They only set the order of minibatches. |
+| PPO `seed`, `rng` | `seed`, `generator` | First renamed `shuffle_seed` and `shuffle_generator`; since the second round the generator drives everything random PPO does. |
 | `PPOUpdateResult` | `PPOUpdateSummary` | It summarises a whole update. |
 | `entropy` (a mean) in the PPO loss | `mean_entropy` | Distinguishes it from the per-sample values. |
 | `…_tensor`, `…_array` suffixes | dropped | NumPy conversions disappear. |
@@ -90,11 +90,57 @@ repeats of the same interaction for every environment.
 `tests/test_normalization.py` are rewritten for the batched interface in the
 same way. The README and the roadmap record continuous PPO as implemented.
 
+## Second round: closing the PPO path
+
+A review of everything PPO uses, made before the Centipede builds its agents
+on it, found that the batched PPO does no NumPy work while it acts or learns,
+but still had four shortcomings. They were measured on the local MX330 GPU
+(PyTorch 2.14.1), with PyTorch's sync-debug mode, which reports every point
+where the CPU stops to wait for the GPU.
+
+- **Hidden waits for the GPU.** `sample_action` waited six times, each
+  update minibatch six times, and a deterministic `select_action` twice. Two
+  causes: PyTorch's distributions check their arguments by default, and every
+  check reads a GPU value on the CPU; and `SquashedGaussianPolicy` kept its
+  action scale and bias on the CPU and copied them to the GPU on every call.
+  Removing them made a minibatch 4% faster and a `sample_action` of 1,024
+  observations 18% faster (1.29 to 1.06 ms).
+- **No random generator of its own.** Only the minibatch order had its own
+  generator; actions and the continuous entropy estimate were drawn from
+  PyTorch's global generator, which any other code in the process also draws
+  from. Several PPO agents in one program could not each own a random sequence,
+  and a checkpoint could not restore one.
+- **No checkpoints.** A user had to collect both networks, both optimizers, and
+  the generator separately.
+- **NumPy in the constructors.** Settings and action bounds were checked with
+  NumPy, so bounds given as GPU tensors failed.
+
+The measurements also showed what does not need changing. A minibatch costs
+about 3 ms on the CPU and 8 ms on the MX330 whatever its size up to 4,096
+samples, so the time of an update depends mostly on how many minibatches it
+takes; that is the user's choice of minibatch size, not a library fault. One
+`sample_action` takes about 1 ms, so evaluating several agents' networks in
+one operation is not worth its complexity next to a slow simulation.
+
+| Part | Change |
+| --- | --- |
+| `policies/neural.py` | Distributions are built without argument checks. The action scale and bias are created once on the network's device, from bounds given as a tensor or a sequence and checked once on the CPU. Both policies take an optional `generator` and draw every random number from it, falling back to PyTorch's global generator without one. |
+| `algorithms/policy_gradient/ppo.py` | `seed` creates one `generator`, used for sampling actions, estimating the continuous entropy, and shuffling minibatches. `state_dict()` and `load_state_dict()` save and restore both networks, both optimizers, and the generator; the generator is restored only on the same kind of device, since CPU and CUDA generators draw different sequences. `PPOUpdateSummary` adds `explained_variance`, how much of the returns' variance the values that collected the batch explained. |
+| `normalization.py` | `load_state_dict()` restores saved statistics into an existing normaliser whose size and mode match; `from_state_dict()` builds a new one with it. |
+| `networks/policy.py`, `optimization/gradient_clipping.py` | Settings are checked with `math` instead of NumPy. |
+| `experiments/policy_gradient/` | One helper seeds an episode's actions: PPO's generator, and PyTorch's global one for the other algorithms. |
+
+Without argument checks, a non-finite network output no longer raises an error
+inside a distribution. Users check the update summary once per update instead,
+as the experiment runner does. Because actions are now drawn from PPO's own
+generator, a run with the same seeds no longer repeats the earlier runs'
+episodes, so the two standard runs are repeated.
+
 ## Not included
 
 The other algorithms and families, TRPO, a vectorised Gymnasium runner, rollout
 storage (each user of PPO keeps its own), and evaluating several agents'
-networks in one operation.
+networks in one operation (measured above as not worth it).
 
 ## Validation
 
@@ -103,9 +149,15 @@ networks in one operation.
   different steps; the normaliser gives the same statistics whether a batch is
   added whole or in parts; a batch gives the same log-probabilities and values
   as its rows one at a time; an update runs on CUDA when a GPU is available.
+- Second round, unit tests: on a GPU, acting and a minibatch step never make
+  the CPU wait; the same seed repeats the same actions whatever the global
+  generator does; a PPO restored from `state_dict()` then acts and learns
+  exactly like the original; the explained variance matches its definition;
+  a saved normaliser restores into an existing one.
 - End to end: continuous PPO on `Pendulum-v1`, the first standard validation of
   continuous PPO, and a repeat of the discrete `CartPole-v1` standard run to
-  confirm that nothing regressed.
+  confirm that nothing regressed. Both are repeated once after the second round,
+  since its random sequences differ.
 
 ## Status
 
@@ -119,6 +171,9 @@ networks in one operation.
 | CartPole standard run | Passed (`runs/CartPole-v1/policy_gradient/ppo/20261005T151407374209Z`) |
 | Pendulum tuning run | Learns (`runs/Pendulum-v1/policy_gradient/ppo/20261005T152847439240Z`) |
 | Pendulum standard run | Passed (`runs/Pendulum-v1/policy_gradient/ppo/20261005T172417206109Z`) |
+| Second round: code, tests, documentation | Done |
+| Second round: CartPole standard run repeated | Passed (`runs/CartPole-v1/policy_gradient/ppo/20261005T190913000252Z`) |
+| Second round: Pendulum standard run repeated | Passed (`runs/Pendulum-v1/policy_gradient/ppo/20261005T192332852663Z`) |
 
 **CartPole result (2026-10-05).** The batched PPO repeated the standard run of
 2026-08-26 with the same learning settings and paired seeds (932104 to 932106).
@@ -152,3 +207,19 @@ worst is -648.4, so some starting angles still defeat the swing-up. Seed 14431
 fell back to -602.1 at 75% and recovered, the kind of instability untuned PPO
 shows. This is the first standard validation of continuous PPO, and it
 completes the validation of the batched PPO.
+
+**Second-round results (2026-10-05).** Both standard runs were repeated with
+the same 34 recorded settings and paired seeds, on PyTorch 2.7.1. The untrained
+returns at the 0% checkpoint are identical to the earlier runs (CartPole 20.3,
+18.3, 22.1; Pendulum -1,214.8, -1,252.1, -1,190.9): seeding PPO's own generator
+with an episode's action seed draws the same actions as seeding the global
+generator did. Training then differs, as expected, because minibatches are now
+shuffled, and the continuous entropy estimated, from that same generator.
+CartPole: all three seeds reached a frozen-policy return of 500 with 100%
+success, every seed by 50% of training (seed 932106 at 25%: 354, against 295
+before). Pendulum: final mean returns of -237.5, -180.2, and -162.6, or
+-193.5 +/- 39.2 across seeds (before: -184.3 +/- 17.9); over the 150 final
+evaluation episodes the median is -127.5 (before -130.3) and 60% are better
+than -200 (before 57%). Seed 14431 collapsed to -1,300.4 at 50% and recovered,
+the same kind of instability as before (-602.1 at 75%). Both runs pass; the
+second round changed no learning behaviour beyond the random sequences.

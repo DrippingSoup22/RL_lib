@@ -1,8 +1,8 @@
 """Small gradient utilities shared by neural algorithms."""
 
+import math
 from collections.abc import Iterable
 
-import numpy as np
 import torch
 
 
@@ -10,7 +10,7 @@ def validate_max_gradient_norm(value: float | None) -> float | None:
     """Validate and normalize an optional gradient-norm limit."""
     if value is None:
         return None
-    if not np.isfinite(value) or value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError("Maximum gradient norm must be finite and positive")
     return float(value)
 

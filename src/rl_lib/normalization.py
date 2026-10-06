@@ -187,10 +187,8 @@ class ObservationNormalizer:
         state: Mapping[str, Any],
         device: torch.device | str = "cpu",
     ) -> ObservationNormalizer:
-        """Restore a normalizer saved by ``state_dict`` onto ``device``.
-
-        The state comes from a file, so its statistics are checked here, once.
-        """
+        """A new normalizer with the settings and statistics saved by
+        ``state_dict``, on ``device``."""
         normalizer = cls(
             int(state["observation_size"]),
             str(state["mode"]),
@@ -200,14 +198,26 @@ class ObservationNormalizer:
             clip_limit=float(state["clip_limit"]),
             device=device,
         )
+        normalizer.load_state_dict(state)
+        return normalizer
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Restore the running statistics saved by ``state_dict``.
+
+        The settings stay this normalizer's own; the saved mode must match
+        them, and the statistics must have this normalizer's size. The state
+        comes from a file, so it is checked here, once.
+        """
+        if str(state["mode"]) != self.mode:
+            raise ValueError("saved normalizer has a different mode")
         observation_count = int(state["observation_count"])
         mean, squared_deviation_sum = (
-            torch.as_tensor(state[key], dtype=torch.float64, device=normalizer.device)
+            torch.as_tensor(state[key], dtype=torch.float64, device=self.device)
             for key in ("mean", "squared_deviation_sum")
         )
         if observation_count < 0:
             raise ValueError("normalizer observation count must be nonnegative")
-        expected_shape = (normalizer.observation_size,)
+        expected_shape = (self.observation_size,)
         if (
             mean.shape != expected_shape
             or squared_deviation_sum.shape != expected_shape
@@ -220,8 +230,7 @@ class ObservationNormalizer:
         if torch.any(squared_deviation_sum < 0):
             raise ValueError("normalizer squared deviations must be nonnegative")
 
-        # Clones, so the restored normaliser never shares memory with ``state``.
-        normalizer.observation_count = observation_count
-        normalizer.mean = mean.clone()
-        normalizer.squared_deviation_sum = squared_deviation_sum.clone()
-        return normalizer
+        # Clones, so the normaliser never shares memory with ``state``.
+        self.observation_count = observation_count
+        self.mean = mean.clone()
+        self.squared_deviation_sum = squared_deviation_sum.clone()

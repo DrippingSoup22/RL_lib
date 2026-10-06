@@ -26,7 +26,7 @@ def test_ppo_runner_updates_one_batch_of_complete_cartpole_episodes() -> None:
         actor_optimizer,
         critic_network,
         critic_optimizer,
-        shuffle_seed=0,
+        seed=0,
     )
     actor_before = {
         name: value.detach().clone()
@@ -86,7 +86,7 @@ def test_ppo_runner_updates_one_batch_of_continuous_pendulum_episodes() -> None:
         actor_optimizer,
         critic_network,
         critic_optimizer,
-        shuffle_seed=0,
+        seed=0,
         action_low=env.action_space.low,
         action_high=env.action_space.high,
     )
