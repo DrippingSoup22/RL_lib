@@ -81,6 +81,10 @@ coverage without framework-level complexity.
 
 ## Commands
 
+RL_lib runs inside WSL (Ubuntu), where `make` and the environment that
+`local.mk` points to are installed. It keeps that environment for now, so
+don't create a `.venv`.
+
 The Makefile uses `python3` by default. Machine-specific interpreter overrides
 belong in the ignored `local.mk`, for example `PYTHON := /path/to/python`.
 These commands use the interpreter the Makefile selects, and work from Zed:
