@@ -15,6 +15,55 @@ import torch.nn as nn
 
 from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 
+# How many steps of colored noise are drawn at a time, as in Hollenstein,
+# Martius and Piater (AAAI 2024).
+COLORED_NOISE_STEPS = 1000
+
+
+def colored_noise(
+    beta: float,
+    shape: torch.Size,
+    steps: int,
+    *,
+    generator: torch.Generator | None,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Standard normal noise whose power falls as 1/f^beta along time.
+
+    Returns ``(steps, *shape)``: an independent sequence through time for
+    every element of ``shape``. ``beta`` 0 gives white noise, 1 pink noise and
+    2 red noise; the larger it is, the more slowly the noise drifts. The method
+    is Timmer and König (1995), as in Patzelt's ``colorednoise`` package (MIT
+    license), which Eberhard et al. (ICLR 2023) use: each Fourier coefficient
+    is a complex normal number scaled by f^(-beta/2), the lowest frequency's
+    scale standing in for f = 0, and the inverse transform gives the sequence,
+    divided by its theoretical standard deviation.
+    """
+    frequencies = torch.fft.rfftfreq(steps, device=device, dtype=dtype)
+    frequencies[0] = frequencies[1]
+    scale = frequencies ** (-beta / 2)
+    # The standard deviation the coefficients give the sequence. At an even
+    # length, the highest frequency's coefficient counts once, not twice.
+    weights = scale[1:].clone()
+    weights[-1] *= (1 + steps % 2) / 2
+    standard_deviation = 2 * torch.sqrt(torch.sum(weights**2)) / steps
+
+    size = (*shape, len(frequencies))
+    real = scale * torch.randn(size, generator=generator, device=device, dtype=dtype)
+    imaginary = scale * torch.randn(
+        size, generator=generator, device=device, dtype=dtype
+    )
+    # The constant term, and at an even length the highest frequency's, are
+    # real numbers, given the whole power of a complex one.
+    imaginary[..., 0] = 0
+    real[..., 0] *= math.sqrt(2)
+    if steps % 2 == 0:
+        imaginary[..., -1] = 0
+        real[..., -1] *= math.sqrt(2)
+    sequences = torch.fft.irfft(torch.complex(real, imaginary), n=steps)
+    return (sequences / standard_deviation).movedim(-1, 0).contiguous()
+
 
 class CategoricalPolicy:
     """Categorical action policy backed by a discrete policy network."""
@@ -69,6 +118,15 @@ class SquashedGaussianPolicy:
 
     Create it after moving the network to its device: the action scale and bias
     are placed on that device once, here.
+
+    ``noise_beta`` colors the noise of sampled actions: 0, the default, draws
+    fresh white noise for every sample; above 0, each row and action component
+    of the samples follows its own colored-noise sequence (``colored_noise``)
+    from one call of ``sample`` to the next, so that exploration moves smoothly
+    instead of jittering. Each sample's noise is still standard normal, so its
+    log-probability is unchanged (Hollenstein, Martius and Piater, AAAI 2024).
+    The sequences are drawn ``COLORED_NOISE_STEPS`` steps at a time, and drawn
+    afresh when the number of rows changes.
     """
 
     def __init__(
@@ -78,6 +136,7 @@ class SquashedGaussianPolicy:
         action_high: torch.Tensor | Sequence[float],
         *,
         generator: torch.Generator | None = None,
+        noise_beta: float = 0.0,
     ) -> None:
         # The bounds come from outside, usually an environment's action space,
         # so they are checked once, here, on the CPU.
@@ -94,9 +153,15 @@ class SquashedGaussianPolicy:
             raise ValueError(
                 "Each upper action bound must be greater than its lower bound"
             )
+        if not math.isfinite(noise_beta) or noise_beta < 0:
+            raise ValueError("noise_beta must be finite and nonnegative")
 
         self.network = network
         self.generator = generator
+        self.noise_beta = noise_beta
+        # The colored-noise sequences being used, and how many steps of them.
+        self._noise_sequences: torch.Tensor | None = None
+        self._noise_steps_used = 0
         device = next(network.parameters()).device
         self.scale = ((high - low) / 2).to(device)
         self.bias = ((high + low) / 2).to(device)
@@ -123,17 +188,41 @@ class SquashedGaussianPolicy:
     def _draw_latent_action(
         self,
         distribution: torch.distributions.Normal,
+        noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # The mean plus the spread times standard normal noise from this
-        # policy's generator. Written this way, the draw stays differentiable
-        # through the mean and spread, like Normal.rsample.
-        noise = torch.randn(
-            distribution.loc.shape,
-            dtype=distribution.loc.dtype,
-            device=distribution.loc.device,
-            generator=self.generator,
-        )
+        # The mean plus the spread times standard normal noise, fresh from this
+        # policy's generator unless given. Written this way, the draw stays
+        # differentiable through the mean and spread, like Normal.rsample.
+        if noise is None:
+            noise = torch.randn(
+                distribution.loc.shape,
+                dtype=distribution.loc.dtype,
+                device=distribution.loc.device,
+                generator=self.generator,
+            )
         return distribution.loc + distribution.scale * noise
+
+    def _next_colored_noise(self, mean: torch.Tensor) -> torch.Tensor:
+        # One step of the colored-noise sequences, one sequence per element of
+        # the mean, drawing new ones when they are used up or the shape changes.
+        sequences = self._noise_sequences
+        if (
+            sequences is None
+            or sequences.shape[1:] != mean.shape
+            or self._noise_steps_used == len(sequences)
+        ):
+            sequences = self._noise_sequences = colored_noise(
+                self.noise_beta,
+                mean.shape,
+                COLORED_NOISE_STEPS,
+                generator=self.generator,
+                device=mean.device,
+                dtype=mean.dtype,
+            )
+            self._noise_steps_used = 0
+        noise = sequences[self._noise_steps_used]
+        self._noise_steps_used += 1
+        return noise
 
     def _log_probability(
         self,
@@ -205,8 +294,10 @@ class SquashedGaussianPolicy:
 
         # Keep the raw sample for stable probability evaluation. It is detached,
         # like Normal.sample: the sampled action is data, not a function of the
-        # network.
-        latent_action = self._draw_latent_action(distribution).detach()
+        # network. Only these samples use colored noise; the entropy estimate
+        # always draws white noise.
+        noise = self._next_colored_noise(distribution.loc) if self.noise_beta else None
+        latent_action = self._draw_latent_action(distribution, noise).detach()
 
         # Only the bounded and rescaled action is sent to the environment.
         environment_action = self._to_environment_action(latent_action)

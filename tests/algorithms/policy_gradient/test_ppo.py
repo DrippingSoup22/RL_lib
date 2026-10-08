@@ -354,7 +354,9 @@ def test_constructor_rejects_invalid_settings() -> None:
         (categorical, critic, {"entropy_coefficient": -0.1}),
         (categorical, critic, {"max_gradient_norm": 0.0}),
         (categorical, critic, bounds),
+        (categorical, critic, {"noise_beta": 1.0}),
         (gaussian, critic, {}),
+        (gaussian, critic, {**bounds, "noise_beta": -1.0}),
     ):
         with pytest.raises(ValueError):
             PPO(

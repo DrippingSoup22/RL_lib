@@ -76,14 +76,16 @@ class PPO:
         max_gradient_norm: float | None = None,
         action_low: torch.Tensor | Sequence[float] | None = None,
         action_high: torch.Tensor | Sequence[float] | None = None,
+        noise_beta: float = 0.0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
         ``seed`` starts ``generator``, the one source of everything random this
         PPO does: sampling actions, estimating the continuous entropy, and
         shuffling minibatches. Without it the generator starts from a random
-        seed. Continuous actors need ``action_low`` and ``action_high``;
-        categorical actors must not get them.
+        seed. Continuous actors need ``action_low`` and ``action_high``, and may
+        color their exploration noise with ``noise_beta``
+        (``SquashedGaussianPolicy``); categorical actors must not get them.
         """
         if actor_network.observation_size != critic_network.observation_size:
             raise ValueError("Actor and critic networks must have the same input size")
@@ -113,6 +115,8 @@ class PPO:
         if isinstance(actor_network, CategoricalPolicyNetwork):
             if action_low is not None or action_high is not None:
                 raise ValueError("Categorical PPO must not receive action bounds")
+            if noise_beta:
+                raise ValueError("Categorical PPO has no Gaussian noise to color")
             self.policy = CategoricalPolicy(actor_network, generator=self.generator)
         elif isinstance(actor_network, GaussianPolicyNetwork):
             if action_low is None or action_high is None:
@@ -120,7 +124,11 @@ class PPO:
                     "Continuous PPO requires lower and upper action bounds"
                 )
             self.policy = SquashedGaussianPolicy(
-                actor_network, action_low, action_high, generator=self.generator
+                actor_network,
+                action_low,
+                action_high,
+                generator=self.generator,
+                noise_beta=noise_beta,
             )
         else:
             raise TypeError("Actor network must be categorical or Gaussian")

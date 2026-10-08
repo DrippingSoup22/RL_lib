@@ -5,6 +5,7 @@ import torch
 
 from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
+from rl_lib.policies.neural import colored_noise
 
 ACTION_SCALE = torch.tensor([2.0, 5.0])
 ACTION_BIAS = torch.tensor([0.0, 5.0])
@@ -140,7 +141,57 @@ def test_squashed_gaussian_log_probability_is_stable_near_action_bounds() -> Non
     assert torch.isfinite(log_probability)
 
 
-def test_squashed_gaussian_policy_rejects_invalid_action_bounds() -> None:
+def _lag_one_correlation(noise: torch.Tensor) -> float:
+    """How much each step of ``(steps, ...)`` noise resembles the one before."""
+    return ((noise[1:] * noise[:-1]).mean() / noise.square().mean()).item()
+
+
+def test_colored_noise_is_standard_normal_and_drifts_more_as_beta_grows() -> None:
+    generator = torch.Generator().manual_seed(5)
+    white, pink = (
+        colored_noise(
+            beta,
+            torch.Size([512]),
+            1000,
+            generator=generator,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        for beta in (0.0, 1.0)
+    )
+
+    for noise in (white, pink):
+        assert noise.shape == (1000, 512)
+        assert abs(noise.var().item() - 1) < 0.1
+    assert abs(_lag_one_correlation(white)) < 0.02
+    assert 0.65 < _lag_one_correlation(pink) < 0.85
+
+
+def test_squashed_gaussian_policy_samples_with_colored_noise() -> None:
+    network = GaussianPolicyNetwork(2, 2, initial_std=0.5)
+    policy = SquashedGaussianPolicy(
+        network,
+        [-1.0, -1.0],
+        [1.0, 1.0],
+        generator=torch.Generator().manual_seed(3),
+        noise_beta=1.0,
+    )
+    observations = torch.randn(256, 2)
+    with torch.no_grad():
+        mean, std = network(observations)
+
+    noise = torch.stack(
+        [(policy.sample(observations)[1] - mean) / std for _ in range(100)]
+    )
+
+    # Each sample's noise is standard normal, but follows the one before.
+    assert abs(noise.var().item() - 1) < 0.15
+    assert _lag_one_correlation(noise) > 0.5
+    # A different number of rows starts new sequences.
+    assert policy.sample(observations[:3])[1].shape == (3, 2)
+
+
+def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
     network = GaussianPolicyNetwork(3, 2, hidden_sizes=())
     for action_low, action_high, message in (
         ([-1.0], [1.0, 1.0], "action_low"),
@@ -150,3 +201,5 @@ def test_squashed_gaussian_policy_rejects_invalid_action_bounds() -> None:
     ):
         with pytest.raises(ValueError, match=message):
             SquashedGaussianPolicy(network, action_low, action_high)
+    with pytest.raises(ValueError, match="noise_beta"):
+        SquashedGaussianPolicy(network, [-1.0, -1.0], [1.0, 1.0], noise_beta=-1.0)
