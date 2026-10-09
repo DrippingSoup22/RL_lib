@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -65,6 +67,41 @@ def test_gaussian_network_can_learn_one_global_standard_deviation() -> None:
     assert network.log_std.grad is not None
 
 
+def test_gaussian_network_applies_its_hidden_activation() -> None:
+    # One hidden unit that receives -1: ReLU passes on 0, tanh passes on tanh(-1).
+    for activation, expected_mean in (("relu", 0.0), ("tanh", math.tanh(-1.0))):
+        network = GaussianPolicyNetwork(
+            1, 1, hidden_sizes=(1,), std_mode="global", activation=activation
+        )
+        hidden_layer, _, mean_layer = network.mean_network
+        with torch.no_grad():
+            hidden_layer.weight.fill_(-1.0)
+            hidden_layer.bias.zero_()
+            mean_layer.weight.fill_(1.0)
+            mean_layer.bias.zero_()
+
+        mean, _ = network(torch.ones(1))
+
+        torch.testing.assert_close(mean, torch.tensor([expected_mean]))
+
+
+def test_a_small_mean_output_scale_starts_the_mean_near_zero_everywhere() -> None:
+    torch.manual_seed(0)
+    default = GaussianPolicyNetwork(8, 3, hidden_sizes=(16,))
+    torch.manual_seed(0)
+    scaled = GaussianPolicyNetwork(8, 3, hidden_sizes=(16,), mean_output_scale=0.01)
+    observations = torch.randn(100, 8)
+
+    with torch.no_grad():
+        default_mean, default_std = default(observations)
+        scaled_mean, scaled_std = scaled(observations)
+
+    # The same starting network, but its mean a hundred times smaller.
+    torch.testing.assert_close(scaled_mean, default_mean * 0.01)
+    torch.testing.assert_close(scaled_std, default_std)
+    assert default_mean.abs().max() > 0.1 > 10 * scaled_mean.abs().max()
+
+
 def test_gaussian_network_rejects_invalid_configuration() -> None:
     for arguments, settings in (
         ((0, 2), {}),
@@ -72,6 +109,9 @@ def test_gaussian_network_rejects_invalid_configuration() -> None:
         ((2, 2), {"initial_std": 0.0}),
         ((2, 2), {"initial_std": float("nan")}),
         ((2, 2), {"std_mode": "invalid"}),
+        ((2, 2), {"activation": "sigmoid"}),
+        ((2, 2), {"mean_output_scale": 0.0}),
+        ((2, 2), {"mean_output_scale": float("inf")}),
     ):
         with pytest.raises(ValueError):
             GaussianPolicyNetwork(*arguments, **settings)

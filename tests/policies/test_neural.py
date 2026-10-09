@@ -191,6 +191,30 @@ def test_squashed_gaussian_policy_samples_with_colored_noise() -> None:
     assert policy.sample(observations[:3])[1].shape == (3, 2)
 
 
+def test_colored_noise_starts_new_sequences_every_noise_sequence_steps() -> None:
+    network = GaussianPolicyNetwork(2, 2, initial_std=0.5)
+    policy = SquashedGaussianPolicy(
+        network,
+        [-1.0, -1.0],
+        [1.0, 1.0],
+        generator=torch.Generator().manual_seed(4),
+        noise_beta=1.0,
+        noise_sequence_steps=8,
+    )
+    observations = torch.randn(4096, 2)
+    with torch.no_grad():
+        mean, std = network(observations)
+
+    noise = torch.stack(
+        [(policy.sample(observations)[1] - mean) / std for _ in range(16)]
+    )
+
+    # Within a sequence each step follows the one before; the ninth sample
+    # starts a new, independent sequence.
+    assert _lag_one_correlation(noise[3:5]) > 0.2
+    assert abs(_lag_one_correlation(noise[7:9])) < 0.06
+
+
 def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
     network = GaussianPolicyNetwork(3, 2, hidden_sizes=())
     for action_low, action_high, message in (
@@ -203,3 +227,7 @@ def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
             SquashedGaussianPolicy(network, action_low, action_high)
     with pytest.raises(ValueError, match="noise_beta"):
         SquashedGaussianPolicy(network, [-1.0, -1.0], [1.0, 1.0], noise_beta=-1.0)
+    with pytest.raises(ValueError, match="noise_sequence_steps"):
+        SquashedGaussianPolicy(
+            network, [-1.0, -1.0], [1.0, 1.0], noise_sequence_steps=1
+        )

@@ -1,8 +1,9 @@
 # Colored exploration noise
 
 Added 2026-10-09 for the Centipede project's smoothness tests, in
-`policies/neural.py` (`colored_noise`, `SquashedGaussianPolicy(noise_beta=)`)
-and passed through `PPO(noise_beta=)`.
+`policies/neural.py` (`colored_noise`, `SquashedGaussianPolicy(noise_beta=,
+noise_sequence_steps=)`) and passed through `PPO(noise_beta=,
+noise_sequence_steps=)`.
 
 ## Sources
 
@@ -57,12 +58,17 @@ for `β = 1` and 1.34 for `β = 2` at `T = 1000`.
 - `colored_noise(beta, shape, steps, generator, device, dtype)` returns
   `(steps, *shape)` sequences, one per element of `shape`, drawn from the
   given generator.
-- `SquashedGaussianPolicy(noise_beta=0.0)`: with `noise_beta` 0, `sample`
-  draws white noise exactly as before. Above 0, `sample` takes the next step
-  of `(1000, batch, actions)` sequences, drawing new ones when they are used
-  up or the batch size changes, as Hollenstein et al. do with 1,000-step
-  sequences that do not restart with episodes. The entropy estimate keeps
-  drawing white noise: it estimates the policy's entropy, which colored noise
-  does not change.
+- `SquashedGaussianPolicy(noise_beta=0.0, noise_sequence_steps=1000)`: with
+  `noise_beta` 0, `sample` draws white noise exactly as before. Above 0,
+  `sample` takes the next step of `(noise_sequence_steps, batch, actions)`
+  sequences, drawing new ones when they are used up or the batch size
+  changes; the sequences do not restart with episodes. The default, 1,000
+  steps, is Hollenstein et al.'s, whose tasks' episodes last up to 1,000
+  steps; Eberhard et al.'s code sets the length to the task's episode length.
+  Shorter sequences hold less of the slowest drift: at β = 1, 256-step
+  sequences correlate 0.72 with the step before and 0.32 ten steps before,
+  against 0.77 and 0.45 at 1,000 steps. The entropy estimate keeps drawing
+  white noise: it estimates the policy's entropy, which colored noise does not
+  change.
 - The current sequences are not part of `PPO.state_dict()`: a run continued
   from a checkpoint starts new sequences.

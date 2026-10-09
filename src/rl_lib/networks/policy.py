@@ -5,6 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
+from rl_lib.networks.activations import hidden_activation
+
 
 class CategoricalPolicyNetwork(nn.Module):
     """Map observations to one unnormalized logit per discrete action."""
@@ -44,7 +46,16 @@ class CategoricalPolicyNetwork(nn.Module):
 
 
 class GaussianPolicyNetwork(nn.Module):
-    """Map observations to a diagonal Gaussian's mean and standard deviation."""
+    """Map observations to a diagonal Gaussian's mean and standard deviation.
+
+    ``activation`` is the hidden layers' activation, ``"relu"`` or ``"tanh"``.
+    ``mean_output_scale`` multiplies the starting weights and bias of the layer
+    that outputs the mean. 1 keeps PyTorch's initialization, whose mean varies
+    from one observation to the next. A small value such as 0.01 starts the mean
+    near zero for every observation, so that the first actions differ only by
+    their noise. Andrychowicz et al. (ICLR 2021) found that this start matters
+    surprisingly much, and recommend 0.01.
+    """
 
     def __init__(
         self,
@@ -53,6 +64,8 @@ class GaussianPolicyNetwork(nn.Module):
         hidden_sizes: tuple[int, ...] = (64, 64),
         initial_std: float = 1.0,
         std_mode: str = "state_dependent",
+        activation: str = "relu",
+        mean_output_scale: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -66,6 +79,9 @@ class GaussianPolicyNetwork(nn.Module):
             raise ValueError("Initial std must be finite and greater than 0")
         if std_mode not in ("state_dependent", "global"):
             raise ValueError("std_mode must be 'state_dependent' or 'global'")
+        if not math.isfinite(mean_output_scale) or mean_output_scale <= 0:
+            raise ValueError("Mean output scale must be finite and greater than 0")
+        activation_class = hidden_activation(activation)
 
         self.observation_size = observation_size
         self.action_size = action_size
@@ -77,9 +93,13 @@ class GaussianPolicyNetwork(nn.Module):
 
         for hidden_size in hidden_sizes:
             mean_layers.append(nn.Linear(mean_input_size, hidden_size))
-            mean_layers.append(nn.ReLU())
+            mean_layers.append(activation_class())
             mean_input_size = hidden_size
-        mean_layers.append(nn.Linear(mean_input_size, action_size))
+        mean_output = nn.Linear(mean_input_size, action_size)
+        with torch.no_grad():
+            mean_output.weight.mul_(mean_output_scale)
+            mean_output.bias.mul_(mean_output_scale)
+        mean_layers.append(mean_output)
 
         self.mean_network = nn.Sequential(*mean_layers)
 
@@ -90,7 +110,7 @@ class GaussianPolicyNetwork(nn.Module):
             log_std_layers = []
             for hidden_size in hidden_sizes:
                 log_std_layers.append(nn.Linear(std_input_size, hidden_size))
-                log_std_layers.append(nn.ReLU())
+                log_std_layers.append(activation_class())
                 std_input_size = hidden_size
 
             log_std_output = nn.Linear(std_input_size, action_size)

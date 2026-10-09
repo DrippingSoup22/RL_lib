@@ -14,6 +14,7 @@ from rl_lib.networks import (
 )
 from rl_lib.optimization import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
+from rl_lib.policies.neural import COLORED_NOISE_STEPS
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class PPO:
         action_low: torch.Tensor | Sequence[float] | None = None,
         action_high: torch.Tensor | Sequence[float] | None = None,
         noise_beta: float = 0.0,
+        noise_sequence_steps: int = COLORED_NOISE_STEPS,
         temporal_smoothness_coefficient: float = 0.0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
@@ -85,8 +87,9 @@ class PPO:
         PPO does: sampling actions, estimating the continuous entropy, and
         shuffling minibatches. Without it the generator starts from a random
         seed. Continuous actors need ``action_low`` and ``action_high``, and may
-        color their exploration noise with ``noise_beta``
-        (``SquashedGaussianPolicy``); categorical actors must not get them.
+        color their exploration noise with ``noise_beta``, drawn
+        ``noise_sequence_steps`` steps at a time (``SquashedGaussianPolicy``);
+        categorical actors must not get bounds or a noise color.
 
         ``temporal_smoothness_coefficient`` adds the temporal term of CAPS
         (Mysore et al., ICRA 2021) to the actor's loss, continuous actors only:
@@ -146,6 +149,7 @@ class PPO:
                 action_high,
                 generator=self.generator,
                 noise_beta=noise_beta,
+                noise_sequence_steps=noise_sequence_steps,
             )
         else:
             raise TypeError("Actor network must be categorical or Gaussian")

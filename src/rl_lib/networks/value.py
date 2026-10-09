@@ -3,14 +3,20 @@
 import torch
 import torch.nn as nn
 
+from rl_lib.networks.activations import hidden_activation
+
 
 class StateValueNetwork(nn.Module):
-    """Map one observation, or a batch of observations, to state values."""
+    """Map one observation, or a batch of observations, to state values.
+
+    ``activation`` is the hidden layers' activation, ``"relu"`` or ``"tanh"``.
+    """
 
     def __init__(
         self,
         observation_size: int,
         hidden_sizes: tuple[int, ...] = (64, 64),
+        activation: str = "relu",
     ) -> None:
         super().__init__()
 
@@ -18,6 +24,7 @@ class StateValueNetwork(nn.Module):
             raise ValueError("Observation size must be greater than 0")
         if any(hidden_size <= 0 for hidden_size in hidden_sizes):
             raise ValueError("All hidden sizes must be greater than 0")
+        activation_class = hidden_activation(activation)
 
         self.observation_size = observation_size
         self.hidden_sizes = hidden_sizes
@@ -27,7 +34,7 @@ class StateValueNetwork(nn.Module):
 
         for hidden_size in hidden_sizes:
             layers.append(nn.Linear(input_size, hidden_size))
-            layers.append(nn.ReLU())
+            layers.append(activation_class())
             input_size = hidden_size
         layers.append(nn.Linear(input_size, 1))
 

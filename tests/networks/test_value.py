@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -24,10 +26,27 @@ def test_linear_value_networks_compute_expected_values() -> None:
     torch.testing.assert_close(state_values(observations), torch.tensor([8.5, 0.5]))
 
 
+def test_state_value_network_applies_its_hidden_activation() -> None:
+    # One hidden unit that receives -1: ReLU passes on 0, tanh passes on tanh(-1).
+    for activation, expected_value in (("relu", 0.0), ("tanh", math.tanh(-1.0))):
+        network = StateValueNetwork(1, hidden_sizes=(1,), activation=activation)
+        hidden_layer, _, value_layer = network.network
+        with torch.no_grad():
+            hidden_layer.weight.fill_(-1.0)
+            hidden_layer.bias.zero_()
+            value_layer.weight.fill_(1.0)
+            value_layer.bias.zero_()
+
+        torch.testing.assert_close(
+            network(torch.ones(1, 1)), torch.tensor([expected_value])
+        )
+
+
 def test_value_networks_reject_invalid_dimensions() -> None:
     for constructor in (
         lambda: StateValueNetwork(0),
         lambda: StateValueNetwork(2, hidden_sizes=(4, 0)),
+        lambda: StateValueNetwork(2, activation="sigmoid"),
         lambda: ActionValueNetwork(2, 0),
     ):
         with pytest.raises(ValueError):

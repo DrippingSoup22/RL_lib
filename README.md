@@ -20,7 +20,10 @@ order, and [`docs/batched-ppo.md`](docs/batched-ppo.md) for the batched PPO
 being added for many parallel environments. Continuous PPO can also explore
 with colored noise ([`docs/colored-noise.md`](docs/colored-noise.md)) and keep
 its actions smooth with CAPS's temporal term
-([`docs/action-smoothness.md`](docs/action-smoothness.md)).
+([`docs/action-smoothness.md`](docs/action-smoothness.md)). Its Gaussian
+policy and state-value networks take ReLU or tanh hidden layers, and the
+policy network can start with its mean near zero for every observation, as
+Andrychowicz et al. (ICLR 2021) recommend.
 
 ## Structure
 

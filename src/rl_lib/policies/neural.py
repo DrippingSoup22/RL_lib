@@ -15,8 +15,8 @@ import torch.nn as nn
 
 from rl_lib.networks import CategoricalPolicyNetwork, GaussianPolicyNetwork
 
-# How many steps of colored noise are drawn at a time, as in Hollenstein,
-# Martius and Piater (AAAI 2024).
+# How many steps of colored noise are drawn at a time unless a policy is told
+# otherwise, as in Hollenstein, Martius and Piater (AAAI 2024).
 COLORED_NOISE_STEPS = 1000
 
 
@@ -125,8 +125,10 @@ class SquashedGaussianPolicy:
     from one call of ``sample`` to the next, so that exploration moves smoothly
     instead of jittering. Each sample's noise is still standard normal, so its
     log-probability is unchanged (Hollenstein, Martius and Piater, AAAI 2024).
-    The sequences are drawn ``COLORED_NOISE_STEPS`` steps at a time, and drawn
-    afresh when the number of rows changes.
+    The sequences are drawn ``noise_sequence_steps`` steps at a time, and drawn
+    afresh when the number of rows changes. The default, 1,000 steps, is
+    Hollenstein et al.'s; Eberhard et al.'s code (ICLR 2023) makes a sequence
+    as long as the task's episodes.
     """
 
     def __init__(
@@ -137,6 +139,7 @@ class SquashedGaussianPolicy:
         *,
         generator: torch.Generator | None = None,
         noise_beta: float = 0.0,
+        noise_sequence_steps: int = COLORED_NOISE_STEPS,
     ) -> None:
         # The bounds come from outside, usually an environment's action space,
         # so they are checked once, here, on the CPU.
@@ -155,10 +158,13 @@ class SquashedGaussianPolicy:
             )
         if not math.isfinite(noise_beta) or noise_beta < 0:
             raise ValueError("noise_beta must be finite and nonnegative")
+        if noise_sequence_steps < 2:
+            raise ValueError("noise_sequence_steps must be at least 2")
 
         self.network = network
         self.generator = generator
         self.noise_beta = noise_beta
+        self.noise_sequence_steps = noise_sequence_steps
         # The colored-noise sequences being used, and how many steps of them.
         self._noise_sequences: torch.Tensor | None = None
         self._noise_steps_used = 0
@@ -214,7 +220,7 @@ class SquashedGaussianPolicy:
             sequences = self._noise_sequences = colored_noise(
                 self.noise_beta,
                 mean.shape,
-                COLORED_NOISE_STEPS,
+                self.noise_sequence_steps,
                 generator=self.generator,
                 device=mean.device,
                 dtype=mean.dtype,
