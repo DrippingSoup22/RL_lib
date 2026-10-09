@@ -17,7 +17,10 @@ Bandits, Monte Carlo, tabular temporal-difference, function approximation, the
 two REINFORCE variants, A2C, A3C, and PPO with discrete or bounded continuous
 actions are implemented. See [`docs/roadmap.md`](docs/roadmap.md) for the planned
 order, and [`docs/batched-ppo.md`](docs/batched-ppo.md) for the batched PPO
-being added for many parallel environments.
+being added for many parallel environments. Continuous PPO can also explore
+with colored noise ([`docs/colored-noise.md`](docs/colored-noise.md)) and keep
+its actions smooth with CAPS's temporal term
+([`docs/action-smoothness.md`](docs/action-smoothness.md)).
 
 ## Structure
 
