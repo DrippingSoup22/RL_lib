@@ -77,6 +77,7 @@ class PPO:
         action_low: torch.Tensor | Sequence[float] | None = None,
         action_high: torch.Tensor | Sequence[float] | None = None,
         noise_beta: float = 0.0,
+        temporal_smoothness_coefficient: float = 0.0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
@@ -86,6 +87,12 @@ class PPO:
         seed. Continuous actors need ``action_low`` and ``action_high``, and may
         color their exploration noise with ``noise_beta``
         (``SquashedGaussianPolicy``); categorical actors must not get them.
+
+        ``temporal_smoothness_coefficient`` adds the temporal term of CAPS
+        (Mysore et al., ICRA 2021) to the actor's loss, continuous actors only:
+        that coefficient times the mean distance between the policy's mean
+        actions in each state and in the state after it, so that ``update``
+        then needs ``next_observations``.
         """
         if actor_network.observation_size != critic_network.observation_size:
             raise ValueError("Actor and critic networks must have the same input size")
@@ -93,6 +100,13 @@ class PPO:
             raise ValueError("Clip ratio must be finite and in (0, 1)")
         if not math.isfinite(entropy_coefficient) or entropy_coefficient < 0:
             raise ValueError("Entropy coefficient must be finite and nonnegative")
+        if (
+            not math.isfinite(temporal_smoothness_coefficient)
+            or temporal_smoothness_coefficient < 0
+        ):
+            raise ValueError(
+                "Temporal smoothness coefficient must be finite and nonnegative"
+            )
 
         self.actor_network = actor_network
         self.actor_optimizer = actor_optimizer
@@ -100,6 +114,7 @@ class PPO:
         self.critic_optimizer = critic_optimizer
         self.clip_ratio = clip_ratio
         self.entropy_coefficient = entropy_coefficient
+        self.temporal_smoothness_coefficient = temporal_smoothness_coefficient
         self.max_gradient_norm = validate_max_gradient_norm(max_gradient_norm)
 
         # The networks' device is where all data must be, and where every
@@ -117,6 +132,8 @@ class PPO:
                 raise ValueError("Categorical PPO must not receive action bounds")
             if noise_beta:
                 raise ValueError("Categorical PPO has no Gaussian noise to color")
+            if temporal_smoothness_coefficient:
+                raise ValueError("Categorical PPO has no mean action to smooth")
             self.policy = CategoricalPolicy(actor_network, generator=self.generator)
         elif isinstance(actor_network, GaussianPolicyNetwork):
             if action_low is None or action_high is None:
@@ -192,6 +209,7 @@ class PPO:
         *,
         update_epochs: int,
         minibatch_size: int,
+        next_observations: torch.Tensor | None = None,
     ) -> PPOUpdateSummary:
         """Learn from one collected batch over several shuffled epochs.
 
@@ -202,11 +220,15 @@ class PPO:
         ``advantages``, and ``return_targets``, each ``(N,)``. Advantages are
         normalised once over the whole batch. Each epoch uses every sample
         once, in a new random order, in minibatches of ``minibatch_size``.
+        With a temporal smoothness coefficient, ``next_observations`` holds the
+        observation after each sample's, ``(N, observation_size)``.
         """
         if update_epochs < 1:
             raise ValueError("Update epochs must be positive")
         if minibatch_size < 1:
             raise ValueError("Minibatch size must be positive")
+        if self.temporal_smoothness_coefficient and next_observations is None:
+            raise ValueError("Temporal smoothness needs the next observations")
         batch_size = observations.shape[0]
         if batch_size == 0 or any(
             values.shape[0] != batch_size
@@ -257,6 +279,9 @@ class PPO:
                     old_log_probabilities[minibatch_indices],
                     advantages[minibatch_indices],
                     return_targets[minibatch_indices],
+                    None
+                    if next_observations is None
+                    else next_observations[minibatch_indices],
                 )
                 minibatch_count += 1
 
@@ -304,6 +329,7 @@ class PPO:
         old_log_probabilities: torch.Tensor,
         advantages: torch.Tensor,
         return_targets: torch.Tensor,
+        next_observations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Take one clipped actor step and one critic step on a minibatch.
 
@@ -343,6 +369,18 @@ class PPO:
         actor_loss = (
             -surrogate_objectives.mean() - self.entropy_coefficient * mean_entropy
         )
+        if next_observations is not None and self.temporal_smoothness_coefficient:
+            # CAPS's temporal term: the Euclidean distance between the mean
+            # actions in a state and in the state after it, kept differentiable
+            # where they are equal by a tiny constant under the square root.
+            assert isinstance(self.policy, SquashedGaussianPolicy)
+            action_change = self.policy.deterministic_action(
+                observations
+            ) - self.policy.deterministic_action(next_observations)
+            distance = torch.sqrt(action_change.square().sum(dim=-1) + 1e-12)
+            actor_loss = actor_loss + self.temporal_smoothness_coefficient * (
+                distance.mean()
+            )
 
         # Return targets were calculated before optimization and remain fixed.
         predicted_values = self.critic_network(observations)

@@ -43,7 +43,9 @@ def make_agent(*, device="cpu", optimizer=torch.optim.SGD, seed=0, **settings) -
     )
 
 
-def make_continuous_agent(*, device="cpu", optimizer=torch.optim.SGD, seed=0) -> PPO:
+def make_continuous_agent(
+    *, device="cpu", optimizer=torch.optim.SGD, seed=0, **settings
+) -> PPO:
     """Continuous PPO whose Gaussian mean equals the observation."""
     actor_network = GaussianPolicyNetwork(2, 2, hidden_sizes=(), initial_std=0.5)
     with torch.no_grad():
@@ -58,6 +60,7 @@ def make_continuous_agent(*, device="cpu", optimizer=torch.optim.SGD, seed=0) ->
         seed=seed,
         action_low=torch.tensor([-2.0, 0.0], device=device),
         action_high=torch.tensor([2.0, 10.0], device=device),
+        **settings,
     )
 
 
@@ -164,6 +167,42 @@ def test_minibatch_subtracts_the_entropy_bonus() -> None:
     assert measured["actor_loss"] == pytest.approx(-0.1 * math.log(2.0))
 
 
+def test_minibatch_pulls_the_mean_actions_of_consecutive_states_together() -> None:
+    agent = make_continuous_agent(temporal_smoothness_coefficient=1.0)
+    observations, next_observations = torch.tensor([[0.5, 0.0]]), torch.zeros(1, 2)
+
+    def distance() -> float:
+        actions = agent.policy.deterministic_action(
+            torch.cat((observations, next_observations))
+        )
+        return (actions[0] - actions[1]).norm().item()
+
+    before = distance()
+    sample = agent.sample_action(observations)
+    # With every advantage zero, only the CAPS term moves the actor.
+    measured = agent._update_minibatch(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        torch.zeros(1),
+        torch.zeros(1),
+        next_observations,
+    )
+
+    assert measured[0].item() == pytest.approx(before, rel=1e-4)
+    assert distance() < before
+    with pytest.raises(ValueError, match="next observations"):
+        agent.update(
+            observations,
+            sample.policy_action,
+            sample.log_probability,
+            torch.zeros(1),
+            torch.zeros(1),
+            update_epochs=1,
+            minibatch_size=1,
+        )
+
+
 def test_minibatch_clips_both_networks_gradients_when_configured(monkeypatch) -> None:
     limits = []
     monkeypatch.setattr(
@@ -182,7 +221,7 @@ def test_update_normalizes_advantages_once_and_uses_every_sample_each_epoch(
     agent = make_agent()
     minibatches = []
 
-    def record_minibatch(observations, _actions, _old, advantages, _targets):
+    def record_minibatch(observations, _actions, _old, advantages, _targets, _next):
         minibatches.append((observations[:, 0].tolist(), advantages.tolist()))
         return torch.arange(5.0)
 
@@ -355,8 +394,10 @@ def test_constructor_rejects_invalid_settings() -> None:
         (categorical, critic, {"max_gradient_norm": 0.0}),
         (categorical, critic, bounds),
         (categorical, critic, {"noise_beta": 1.0}),
+        (categorical, critic, {"temporal_smoothness_coefficient": 0.1}),
         (gaussian, critic, {}),
         (gaussian, critic, {**bounds, "noise_beta": -1.0}),
+        (gaussian, critic, {**bounds, "temporal_smoothness_coefficient": -0.1}),
     ):
         with pytest.raises(ValueError):
             PPO(
