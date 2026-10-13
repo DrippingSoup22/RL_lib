@@ -81,12 +81,48 @@ def test_several_reward_streams_are_estimated_each_as_alone() -> None:
         torch.testing.assert_close(return_targets[..., stream], alone[1])
 
 
+def test_a_lambda_per_step_judges_each_held_decision_on_its_whole_stretch() -> None:
+    """One trajectory of five steps: a decision on step 0 holds three steps,
+    the next, on step 3, two, until the window's end. With lambda 1 inside
+    each stretch and 0.5 before the next decision, each decision's advantage
+    is its stretch's discounted rewards plus the value where the next one
+    starts, minus its own value, plus half the next decision's advantage."""
+    generator = torch.Generator().manual_seed(0)
+    rewards, values = torch.randn(2, 5, generator=generator)
+    last_next_value = torch.randn(1, generator=generator)
+    next_values = torch.cat((values[1:], last_next_value))
+    no_end = torch.zeros(5, dtype=torch.bool)
+    gamma = 0.9
+
+    advantages, _ = generalized_advantage_estimates(
+        rewards,
+        values,
+        next_values,
+        terminated=no_end,
+        episode_ended=no_end,
+        discount=gamma,
+        gae_lambda=torch.tensor([1.0, 1.0, 0.5, 1.0, 0.5]),
+    )
+
+    second = rewards[3] + gamma * rewards[4] + gamma**2 * last_next_value - values[3]
+    first = (
+        rewards[0]
+        + gamma * rewards[1]
+        + gamma**2 * rewards[2]
+        + gamma**3 * values[3]
+        - values[0]
+        + gamma**3 * 0.5 * second
+    )
+    torch.testing.assert_close(advantages[[0, 3]], torch.cat((first, second)))
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     (
         ({"discount": 1.5}, "Discount"),
         ({"gae_lambda": -0.1}, "lambda"),
         ({"gae_lambda": float("nan")}, "lambda"),
+        ({"gae_lambda": torch.ones(3)}, "steps' shape"),
         ({"next_values": torch.zeros(3)}, "same shape"),
     ),
 )
