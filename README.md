@@ -23,7 +23,10 @@ its actions smooth with CAPS's temporal term
 ([`docs/action-smoothness.md`](docs/action-smoothness.md)). Its Gaussian
 policy and state-value networks take ReLU or tanh hidden layers, and the
 policy network can start with its mean near zero for every observation, as
-Andrychowicz et al. (ICLR 2021) recommend.
+Andrychowicz et al. (ICLR 2021) recommend. PPO can learn several critics,
+one per reward, each advantage normalised on its own and weighted (van
+Seijen et al., NeurIPS 2017), and can leave out of learning the action
+components the environment did not use.
 
 ## Structure
 
