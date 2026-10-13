@@ -148,6 +148,31 @@ def test_a_noise_scale_multiplies_the_spread_of_samples_and_their_evaluation() -
     torch.testing.assert_close(evaluated, expected)
 
 
+def test_an_action_mask_leaves_the_components_that_did_not_act_out() -> None:
+    policy = _linear_squashed_gaussian_policy(torch.Generator().manual_seed(17))
+    observations = torch.tensor([[0.25, -0.5], [-0.25, 0.5]])
+    action_mask = torch.tensor([[1.0, 0.0], [0.0, 0.0]])
+
+    _, latent_actions, log_probabilities = policy.sample(
+        observations, action_mask=action_mask
+    )
+    evaluated, entropy = policy.evaluate_actions(
+        observations, latent_actions, action_mask=action_mask
+    )
+
+    # Only the first sample's first component counts; the second sample acted
+    # in nothing, so it has neither probability nor entropy to learn from.
+    first = latent_actions[0, 0]
+    expected = (
+        torch.distributions.Normal(0.25, 0.5).log_prob(first)
+        - torch.log1p(-torch.tanh(first).square())
+        - torch.log(ACTION_SCALE[0])
+    )
+    torch.testing.assert_close(log_probabilities[0], expected)
+    torch.testing.assert_close(evaluated, log_probabilities)
+    assert log_probabilities[1] == 0.0 and entropy[1] == 0.0
+
+
 def test_squashed_gaussian_log_probability_is_stable_near_action_bounds() -> None:
     policy = _linear_squashed_gaussian_policy()
 

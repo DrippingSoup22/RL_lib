@@ -57,6 +57,30 @@ def test_zero_lambda_keeps_only_each_steps_own_td_error() -> None:
     torch.testing.assert_close(return_targets, torch.tensor([1.225, 3.8]))
 
 
+def test_several_reward_streams_are_estimated_each_as_alone() -> None:
+    """Two streams over the same three steps in two environments, the second
+    environment's episode ending on step 0: each stream's estimates are those
+    it would get alone."""
+    generator = torch.Generator().manual_seed(0)
+    rewards, values, next_values = torch.randn(3, 3, 2, 2, generator=generator)
+    ended = torch.tensor([[False, True], [False, False], [False, False]])
+    settings = {"terminated": ended, "episode_ended": ended, "discount": 0.9}
+
+    advantages, return_targets = generalized_advantage_estimates(
+        rewards, values, next_values, **settings
+    )
+
+    for stream in range(2):
+        alone = generalized_advantage_estimates(
+            rewards[..., stream],
+            values[..., stream],
+            next_values[..., stream],
+            **settings,
+        )
+        torch.testing.assert_close(advantages[..., stream], alone[0])
+        torch.testing.assert_close(return_targets[..., stream], alone[1])
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     (

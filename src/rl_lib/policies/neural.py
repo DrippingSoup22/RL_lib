@@ -142,6 +142,14 @@ class SquashedGaussianPolicy:
     evaluated again, PPO's probability ratio compares the same distribution.
     A smaller scale makes the same distance from the mean less likely, so the
     log-probability's gradient toward the mean grows as 1 / s^2.
+
+    A caller may also mark which components of each action took effect:
+    ``sample``, ``evaluate_actions`` and ``entropy`` take ``action_mask``,
+    shaped like the actions, 1 for a component that acted and 0 for one the
+    environment did not use. The masked-out components are drawn as usual but
+    left out of the log-probability and the entropy, as if the policy had not
+    chosen them: an action whose effect never happened carries no credit or
+    blame, so learning from it would only add noise.
     """
 
     def __init__(
@@ -251,6 +259,7 @@ class SquashedGaussianPolicy:
         self,
         distribution: torch.distributions.Normal,
         latent_action: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Start with the density of each raw sample under its Normal component.
         base_log_prob = distribution.log_prob(latent_action)
@@ -265,42 +274,52 @@ class SquashedGaussianPolicy:
         component_log_probabilities = base_log_prob - log_tanh_jacobian - self.log_scale
 
         # The components form one joint action. Their densities multiply, so
-        # their log-densities add to one value per observation.
+        # their log-densities add to one value per observation; only the
+        # components that acted count.
+        if action_mask is not None:
+            component_log_probabilities = component_log_probabilities * action_mask
         return component_log_probabilities.sum(dim=-1)
 
     def _entropy(
         self,
         distribution: torch.distributions.Normal,
+        action_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The entropy after tanh has no simple closed-form expression. Estimate
         # it with one fresh action sampled from the current distribution. The
         # draw keeps gradients, so entropy regularization can update both the
         # means and standard deviations of the policy.
         latent_action = self._draw_latent_action(distribution)
-        return -self._log_probability(distribution, latent_action)
+        return -self._log_probability(distribution, latent_action, action_mask)
 
     def evaluate_actions(
         self,
         observations: torch.Tensor,
         latent_actions: torch.Tensor,
         noise_scale: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate stored latent actions under the current policy, with the
-        noise scales they were drawn with, if any."""
+        noise scales they were drawn with and the components that acted, if
+        given."""
         distribution = self._distribution(observations, noise_scale)
 
         # Reuse the exact latent actions collected earlier. This is especially
         # important for PPO, which compares their old and new log-probabilities.
-        log_probabilities = self._log_probability(distribution, latent_actions)
+        log_probabilities = self._log_probability(
+            distribution, latent_actions, action_mask
+        )
 
         # Entropy measures current exploration and uses a separate fresh sample;
         # the stored actions may have come from an older version of the policy.
-        entropy = self._entropy(distribution)
+        entropy = self._entropy(distribution, action_mask)
         return log_probabilities, entropy
 
-    def entropy(self, observations: torch.Tensor) -> torch.Tensor:
+    def entropy(
+        self, observations: torch.Tensor, action_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Estimate the squashed policy entropy for each observation."""
-        return self._entropy(self._distribution(observations))
+        return self._entropy(self._distribution(observations), action_mask)
 
     def deterministic_action(
         self,
@@ -315,6 +334,7 @@ class SquashedGaussianPolicy:
         self,
         observation: torch.Tensor,
         noise_scale: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         distribution = self._distribution(observation, noise_scale)
 
@@ -330,6 +350,8 @@ class SquashedGaussianPolicy:
 
         # This remains differentiable through the distribution parameters, so a
         # policy-gradient loss can increase or decrease support for this action.
-        log_probability = self._log_probability(distribution, latent_action)
+        log_probability = self._log_probability(
+            distribution, latent_action, action_mask
+        )
 
         return environment_action, latent_action, log_probability
