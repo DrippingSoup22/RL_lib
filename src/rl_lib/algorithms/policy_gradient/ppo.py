@@ -154,13 +154,21 @@ class PPO:
         else:
             raise TypeError("Actor network must be categorical or Gaussian")
 
-    def sample_action(self, observations: torch.Tensor) -> PPOActionSample:
+    def sample_action(
+        self,
+        observations: torch.Tensor,
+        noise_scales: torch.Tensor | None = None,
+    ) -> PPOActionSample:
         """Sample one action per observation, for collecting data to learn from.
 
         ``observations`` is ``(B, observation_size)``. Nothing keeps gradients:
         the sample is a fixed record that ``update`` later compares with the
-        changed policy.
+        changed policy. For continuous actions, ``noise_scales``
+        ``(B, action_size)`` scales each sample's exploration
+        (``SquashedGaussianPolicy``); ``update`` then needs the same scales.
         """
+        if noise_scales is not None and isinstance(self.policy, CategoricalPolicy):
+            raise ValueError("Noise scales apply to continuous actions only")
         with torch.no_grad():
             value = self.critic_network(observations)
             if isinstance(self.policy, CategoricalPolicy):
@@ -169,7 +177,7 @@ class PPO:
                 environment_action = policy_action = action
             else:
                 environment_action, policy_action, log_probability = self.policy.sample(
-                    observations
+                    observations, noise_scales
                 )
         return PPOActionSample(
             environment_action=environment_action,
@@ -214,6 +222,7 @@ class PPO:
         update_epochs: int,
         minibatch_size: int,
         next_observations: torch.Tensor | None = None,
+        noise_scales: torch.Tensor | None = None,
     ) -> PPOUpdateSummary:
         """Learn from one collected batch over several shuffled epochs.
 
@@ -225,7 +234,9 @@ class PPO:
         normalised once over the whole batch. Each epoch uses every sample
         once, in a new random order, in minibatches of ``minibatch_size``.
         With a temporal smoothness coefficient, ``next_observations`` holds the
-        observation after each sample's, ``(N, observation_size)``.
+        observation after each sample's, ``(N, observation_size)``. Samples
+        drawn with noise scales need them again, ``(N, action_size)``, so that
+        each is evaluated under the distribution it was drawn from.
         """
         if update_epochs < 1:
             raise ValueError("Update epochs must be positive")
@@ -233,6 +244,8 @@ class PPO:
             raise ValueError("Minibatch size must be positive")
         if self.temporal_smoothness_coefficient and next_observations is None:
             raise ValueError("Temporal smoothness needs the next observations")
+        if noise_scales is not None and isinstance(self.policy, CategoricalPolicy):
+            raise ValueError("Noise scales apply to continuous actions only")
         batch_size = observations.shape[0]
         if batch_size == 0 or any(
             values.shape[0] != batch_size
@@ -241,6 +254,7 @@ class PPO:
                 old_log_probabilities,
                 advantages,
                 return_targets,
+                *(() if noise_scales is None else (noise_scales,)),
             )
         ):
             raise ValueError("Every input must hold the same nonzero number of samples")
@@ -286,6 +300,7 @@ class PPO:
                     None
                     if next_observations is None
                     else next_observations[minibatch_indices],
+                    None if noise_scales is None else noise_scales[minibatch_indices],
                 )
                 minibatch_count += 1
 
@@ -334,6 +349,7 @@ class PPO:
         advantages: torch.Tensor,
         return_targets: torch.Tensor,
         next_observations: torch.Tensor | None = None,
+        noise_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Take one clipped actor step and one critic step on a minibatch.
 
@@ -342,10 +358,14 @@ class PPO:
         ``update`` can add them up on the device without waiting for it.
         """
 
-        # Re-evaluate the collected actions under the current, changing policy.
-        new_log_probabilities, entropy_values = self.policy.evaluate_actions(
-            observations,
-            policy_actions,
+        # Re-evaluate the collected actions under the current, changing policy,
+        # with the noise scales they were drawn with.
+        new_log_probabilities, entropy_values = (
+            self.policy.evaluate_actions(observations, policy_actions)
+            if noise_scales is None
+            else self.policy.evaluate_actions(
+                observations, policy_actions, noise_scales
+            )
         )
 
         log_probability_ratios = new_log_probabilities - old_log_probabilities

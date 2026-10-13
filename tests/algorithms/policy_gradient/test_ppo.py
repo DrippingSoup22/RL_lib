@@ -221,7 +221,9 @@ def test_update_normalizes_advantages_once_and_uses_every_sample_each_epoch(
     agent = make_agent()
     minibatches = []
 
-    def record_minibatch(observations, _actions, _old, advantages, _targets, _next):
+    def record_minibatch(
+        observations, _actions, _old, advantages, _targets, _next, _scales
+    ):
         minibatches.append((observations[:, 0].tolist(), advantages.tolist()))
         return torch.arange(5.0)
 
@@ -264,6 +266,34 @@ def test_update_normalizes_advantages_once_and_uses_every_sample_each_epoch(
         minibatch_size=2,
     )
     assert minibatches[0][1] == [2.0, 2.0]
+
+
+def test_update_evaluates_each_sample_under_the_noise_scale_it_was_drawn_with() -> None:
+    observations = torch.tensor([[0.0, 0.0], [1.0, -1.0], [0.5, 2.0]])
+    noise_scales = torch.tensor([[0.2, 1.0], [1.0, 0.5], [0.1, 0.1]])
+    sample = make_continuous_agent().sample_action(observations, noise_scales)
+
+    def first_kl(scales) -> float:
+        # A fresh agent's policy before its step is the sampling one.
+        return (
+            make_continuous_agent()
+            .update(
+                observations,
+                sample.policy_action,
+                sample.log_probability,
+                torch.tensor([1.0, -1.0, 0.5]),
+                torch.zeros(3),
+                update_epochs=1,
+                minibatch_size=3,
+                noise_scales=scales,
+            )
+            .approximate_kl
+        )
+
+    # Under the scales it was drawn with, each sample's probability is
+    # unchanged; without them it looks like another policy's.
+    assert first_kl(noise_scales) == pytest.approx(0.0, abs=1e-6)
+    assert first_kl(None) > 0.01
 
 
 def test_update_reports_how_much_return_variance_the_values_explained() -> None:

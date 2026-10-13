@@ -32,10 +32,10 @@ def _linear_squashed_gaussian_policy(generator=None) -> SquashedGaussianPolicy:
     )
 
 
-def _expected_log_probabilities(observations, latent_actions) -> torch.Tensor:
+def _expected_log_probabilities(observations, latent_actions, std=0.5) -> torch.Tensor:
     """Normal density, corrected for tanh and for scaling to the bounds."""
     return (
-        torch.distributions.Normal(observations, 0.5).log_prob(latent_actions)
+        torch.distributions.Normal(observations, std).log_prob(latent_actions)
         - torch.log1p(-torch.tanh(latent_actions).square())
         - torch.log(ACTION_SCALE)
     ).sum(dim=-1)
@@ -129,6 +129,23 @@ def test_squashed_gaussian_evaluates_stored_latent_actions_and_entropy() -> None
     entropy.mean().backward()
     assert policy.network.mean_network[0].bias.grad is not None
     assert policy.network.log_std_network[0].bias.grad is not None
+
+
+def test_a_noise_scale_multiplies_the_spread_of_samples_and_their_evaluation() -> None:
+    policy = _linear_squashed_gaussian_policy(torch.Generator().manual_seed(17))
+    observations = torch.tensor([[0.25, -0.5], [-0.25, 0.5]])
+    noise_scale = torch.tensor([[0.1, 1.0], [1.0, 0.04]])
+
+    noise = torch.randn(2, 2, generator=torch.Generator().manual_seed(17))
+    _, latent_actions, log_probabilities = policy.sample(observations, noise_scale)
+    evaluated, _ = policy.evaluate_actions(observations, latent_actions, noise_scale)
+
+    torch.testing.assert_close(latent_actions, observations + 0.5 * noise_scale * noise)
+    expected = _expected_log_probabilities(
+        observations, latent_actions, 0.5 * noise_scale
+    )
+    torch.testing.assert_close(log_probabilities, expected)
+    torch.testing.assert_close(evaluated, expected)
 
 
 def test_squashed_gaussian_log_probability_is_stable_near_action_bounds() -> None:

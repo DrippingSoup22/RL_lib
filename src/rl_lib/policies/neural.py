@@ -129,6 +129,19 @@ class SquashedGaussianPolicy:
     afresh when the number of rows changes. The default, 1,000 steps, is
     Hollenstein et al.'s; Eberhard et al.'s code (ICLR 2023) makes a sequence
     as long as the task's episodes.
+
+    A caller may also scale each sample's exploration: ``sample`` and
+    ``evaluate_actions`` take ``noise_scale``, positive factors shaped like the
+    actions, and draw or evaluate each latent action under
+
+        z ~ Normal(mean(o), (s * std(o))^2)
+
+    with ``s`` the sample's scale. The caller sets ``s`` from what it observed,
+    never from the network's parameters, so it is part of the policy at that
+    observation: given the same scale when a sample is drawn and when it is
+    evaluated again, PPO's probability ratio compares the same distribution.
+    A smaller scale makes the same distance from the mean less likely, so the
+    log-probability's gradient toward the mean grows as 1 / s^2.
     """
 
     def __init__(
@@ -185,10 +198,14 @@ class SquashedGaussianPolicy:
     def _distribution(
         self,
         observation: torch.Tensor,
+        noise_scale: torch.Tensor | None = None,
     ) -> torch.distributions.Normal:
         # The network defines one independent Normal distribution per action
-        # component by predicting its mean and standard deviation.
+        # component by predicting its mean and standard deviation; a caller's
+        # noise scale multiplies the deviation.
         mean, std = self.network(observation)
+        if noise_scale is not None:
+            std = std * noise_scale
         return torch.distributions.Normal(mean, std, validate_args=False)
 
     def _draw_latent_action(
@@ -266,9 +283,11 @@ class SquashedGaussianPolicy:
         self,
         observations: torch.Tensor,
         latent_actions: torch.Tensor,
+        noise_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate stored latent actions under the current policy."""
-        distribution = self._distribution(observations)
+        """Evaluate stored latent actions under the current policy, with the
+        noise scales they were drawn with, if any."""
+        distribution = self._distribution(observations, noise_scale)
 
         # Reuse the exact latent actions collected earlier. This is especially
         # important for PPO, which compares their old and new log-probabilities.
@@ -295,8 +314,9 @@ class SquashedGaussianPolicy:
     def sample(
         self,
         observation: torch.Tensor,
+        noise_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        distribution = self._distribution(observation)
+        distribution = self._distribution(observation, noise_scale)
 
         # Keep the raw sample for stable probability evaluation. It is detached,
         # like Normal.sample: the sampled action is data, not a function of the
