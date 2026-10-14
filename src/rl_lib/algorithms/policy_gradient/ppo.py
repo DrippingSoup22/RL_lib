@@ -12,6 +12,7 @@ from rl_lib.networks import (
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.normalization import ObservationNormalizer
 from rl_lib.optimization import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 from rl_lib.policies.neural import COLORED_NOISE_STEPS
@@ -24,8 +25,9 @@ class PPOActionSample:
     ``environment_action`` is what the environment receives. ``policy_action``
     is what ``update`` re-evaluates later: the latent Gaussian sample for
     continuous actions, and the action itself for categorical ones.
-    ``log_probability`` is the sampling policy's log-probability of it and
-    ``value`` the critic's value of the observation, both ``(B,)``.
+    ``log_probability`` is the sampling policy's log-probability of it,
+    ``(B,)``, and ``value`` the critic's value of the observation, ``(B,)``,
+    or with several critics each one's, ``(B, K)``.
     """
 
     environment_action: torch.Tensor
@@ -38,13 +40,16 @@ class PPOActionSample:
 class PPOUpdateSummary:
     """How one update went.
 
-    The first five values are means over all minibatches of the update.
-    ``explained_variance`` describes the critic that collected the batch,
-    before the update: ``1 - Var(return_targets - values) / Var(return_targets)``
-    over the batch. It is 1 when the values predicted the return targets
-    exactly, 0 when they explained none of their variation, negative when they
-    did worse than predicting the mean, and NaN when every return target is the
-    same.
+    The first five values are means over all minibatches of the update; with
+    several critics or with baselines, ``critic_loss`` is the sum of all their
+    losses. ``explained_variance`` describes the critic that collected the
+    batch, before the update: ``1 - Var(return_targets - values) /
+    Var(return_targets)`` over the batch. It is 1 when the values predicted the
+    return targets exactly, 0 when they explained none of their variation,
+    negative when they did worse than predicting the mean, and NaN when every
+    return target is the same. With several critics it is the first one's;
+    ``explained_variances`` holds every critic's, in order, and
+    ``baseline_explained_variances`` every baseline's, measured the same way.
     """
 
     actor_loss: float
@@ -53,6 +58,8 @@ class PPOUpdateSummary:
     approximate_kl: float
     clip_fraction: float
     explained_variance: float
+    explained_variances: tuple[float, ...] = ()
+    baseline_explained_variances: tuple[float, ...] = ()
 
 
 class PPO:
@@ -62,13 +69,41 @@ class PPO:
     moves the networks there before creating their optimizers and this PPO, and
     passes observations and stored data already on it. Nothing makes the CPU
     wait for the GPU, except reading the summary once at the end of an update.
+
+    **Several critics.** The critic may be several, one for each of several
+    rewards the task pays, as in the hybrid reward architecture (van Seijen et
+    al., NeurIPS 2017): a critic that predicts one reward alone learns it from
+    what it depends on, instead of seeing it drowned in another's variation.
+    Rewards, values, advantages and return targets then end with one column per
+    critic, ``K``. The actor learns from one advantage: each critic's,
+    normalised over the batch on its own, times its weight in
+    ``advantage_weights``, added up, so the weights set how much each reward
+    counts whatever its scale.
+
+    **Baselines.** Each critic may have a baseline: a network that sees the
+    actor's observation and more, such as the actions other agents took at the
+    same step, and learns the same return targets. Regressing the return on
+    those inputs learns its expectation over this actor's own action, so the
+    actor's advantage becomes the return target minus the baseline: what this
+    actor's action added, with the part the extra inputs explain removed. It
+    is an action-dependent baseline (Wu et al., ICLR 2018), unbiased as long
+    as the extra inputs do not depend on this actor's action at that step, as
+    when agents choose their actions independently. The critics still value
+    states alone, for bootstrapping: in a state not yet acted in, the others'
+    actions are unknown.
+
+    **Value normalisation.** With ``value_normalization``, critics and
+    baselines learn their return targets standardised by each critic's running
+    mean and spread, and their outputs are turned back into returns (MAPPO's
+    first advice: Yu et al., NeurIPS 2022), so that a reward's units never set
+    the scale the networks must learn.
     """
 
     def __init__(
         self,
         actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
-        critic_network: StateValueNetwork,
+        critic_network: StateValueNetwork | Sequence[StateValueNetwork],
         critic_optimizer: torch.optim.Optimizer,
         clip_ratio: float = 0.2,
         entropy_coefficient: float = 0.0,
@@ -80,6 +115,9 @@ class PPO:
         noise_beta: float = 0.0,
         noise_sequence_steps: int = COLORED_NOISE_STEPS,
         temporal_smoothness_coefficient: float = 0.0,
+        advantage_weights: Sequence[float] | None = None,
+        baseline_networks: Sequence[StateValueNetwork] = (),
+        value_normalization: bool = False,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
@@ -96,9 +134,38 @@ class PPO:
         that coefficient times the mean distance between the policy's mean
         actions in each state and in the state after it, so that ``update``
         then needs ``next_observations``.
+
+        ``critic_network`` may be a sequence of critics, with one weight each
+        in ``advantage_weights`` (1 each by default); a single critic takes no
+        weights. ``baseline_networks``, if any, are one per critic, all with
+        the same input: the actor's observation followed by the extra inputs
+        ``update`` then needs. ``critic_optimizer`` updates every critic's and
+        baseline's parameters.
         """
-        if actor_network.observation_size != critic_network.observation_size:
+        several_critics = not isinstance(critic_network, StateValueNetwork)
+        critic_networks = list(critic_network) if several_critics else [critic_network]
+        if not critic_networks or any(
+            critic.observation_size != actor_network.observation_size
+            for critic in critic_networks
+        ):
             raise ValueError("Actor and critic networks must have the same input size")
+        if advantage_weights is not None and (
+            not several_critics
+            or len(advantage_weights) != len(critic_networks)
+            or not all(math.isfinite(weight) for weight in advantage_weights)
+        ):
+            raise ValueError(
+                "Advantage weights need several critics, one finite weight each"
+            )
+        if baseline_networks and (
+            len(baseline_networks) != len(critic_networks)
+            or len({baseline.observation_size for baseline in baseline_networks}) != 1
+            or baseline_networks[0].observation_size <= actor_network.observation_size
+        ):
+            raise ValueError(
+                "Baselines must be one per critic, with the same input, larger than"
+                " the actor's"
+            )
         if not math.isfinite(clip_ratio) or not 0 < clip_ratio < 1:
             raise ValueError("Clip ratio must be finite and in (0, 1)")
         if not math.isfinite(entropy_coefficient) or entropy_coefficient < 0:
@@ -114,6 +181,9 @@ class PPO:
         self.actor_network = actor_network
         self.actor_optimizer = actor_optimizer
         self.critic_network = critic_network
+        self.critic_networks = critic_networks
+        self.several_critics = several_critics
+        self.baseline_networks = list(baseline_networks)
         self.critic_optimizer = critic_optimizer
         self.clip_ratio = clip_ratio
         self.entropy_coefficient = entropy_coefficient
@@ -128,6 +198,17 @@ class PPO:
             self.generator.seed()
         else:
             self.generator.manual_seed(seed)
+        self.advantage_weights = torch.tensor(
+            advantage_weights or [1.0] * len(critic_networks), device=self.device
+        )
+        # Return targets are standardised per critic; without normalisation
+        # this normaliser leaves them as they are.
+        self.value_normalizer = ObservationNormalizer(
+            len(critic_networks),
+            "running" if value_normalization else "none",
+            clip_limit=math.inf,
+            device=self.device,
+        )
 
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
         if isinstance(actor_network, CategoricalPolicyNetwork):
@@ -162,7 +243,7 @@ class PPO:
         changed policy.
         """
         with torch.no_grad():
-            value = self.critic_network(observations)
+            value = self._values(observations)
             if isinstance(self.policy, CategoricalPolicy):
                 action, log_probability = self.policy.sample(observations)
                 # A categorical action is re-evaluated exactly as it was sent.
@@ -199,9 +280,10 @@ class PPO:
             return environment_action
 
     def state_value(self, observations: torch.Tensor) -> torch.Tensor:
-        """The critic's value of each observation, ``(B,)``, for bootstrapping."""
+        """The critic's value of each observation, ``(B,)``, or with several
+        critics each one's, ``(B, K)``, for bootstrapping."""
         with torch.no_grad():
-            return self.critic_network(observations)
+            return self._values(observations)
 
     def update(
         self,
@@ -214,18 +296,24 @@ class PPO:
         update_epochs: int,
         minibatch_size: int,
         next_observations: torch.Tensor | None = None,
+        baseline_inputs: torch.Tensor | None = None,
     ) -> PPOUpdateSummary:
         """Learn from one collected batch over several shuffled epochs.
 
         The batch holds ``N`` samples on the networks' device: ``observations``
         ``(N, observation_size)``; ``policy_actions`` ``(N,)`` for categorical
         or ``(N, action_size)`` for continuous PPO, as stored from
-        ``PPOActionSample.policy_action``; and ``old_log_probabilities``,
-        ``advantages``, and ``return_targets``, each ``(N,)``. Advantages are
-        normalised once over the whole batch. Each epoch uses every sample
-        once, in a new random order, in minibatches of ``minibatch_size``.
-        With a temporal smoothness coefficient, ``next_observations`` holds the
-        observation after each sample's, ``(N, observation_size)``.
+        ``PPOActionSample.policy_action``; ``old_log_probabilities`` ``(N,)``;
+        and ``advantages`` and ``return_targets``, ``(N,)``, or with several
+        critics ``(N, K)``. With baselines, ``baseline_inputs`` holds each
+        sample's extra inputs, ``(N, extra)``, and the actor's advantages are
+        the return targets minus the baselines, computed once before learning;
+        otherwise they are ``advantages``. Each critic's advantages are
+        normalised once over the whole batch, then weighted and added up. Each
+        epoch uses every sample once, in a new random order, in minibatches of
+        ``minibatch_size``. With a temporal smoothness coefficient,
+        ``next_observations`` holds the observation after each sample's,
+        ``(N, observation_size)``.
         """
         if update_epochs < 1:
             raise ValueError("Update epochs must be positive")
@@ -233,6 +321,10 @@ class PPO:
             raise ValueError("Minibatch size must be positive")
         if self.temporal_smoothness_coefficient and next_observations is None:
             raise ValueError("Temporal smoothness needs the next observations")
+        if (baseline_inputs is None) == bool(self.baseline_networks):
+            raise ValueError(
+                "Baseline inputs are needed exactly when there are baselines"
+            )
         batch_size = observations.shape[0]
         if batch_size == 0 or any(
             values.shape[0] != batch_size
@@ -244,26 +336,47 @@ class PPO:
             )
         ):
             raise ValueError("Every input must hold the same nonzero number of samples")
+        if advantages.shape != return_targets.shape or advantages.shape[1:] != (
+            (len(self.critic_networks),) if self.several_critics else ()
+        ):
+            raise ValueError("Advantages and return targets need one column per critic")
 
-        # How well the critic that collected the batch predicted its returns.
-        # Return targets are advantages plus values, so the part the values
-        # left unexplained is the advantages, taken before normalisation.
-        return_target_variance = return_targets.var(correction=0)
-        explained_variance = torch.where(
-            return_target_variance > 0,
-            1 - advantages.var(correction=0) / return_target_variance,
-            math.nan,
+        # Every critic's values are a column of their own; a single critic's
+        # are the one column.
+        advantages = advantages.reshape(batch_size, -1)
+        return_targets = return_targets.reshape(batch_size, -1)
+
+        # How well the critics that collected the batch predicted their
+        # returns. Return targets are advantages plus values, so the part the
+        # values left unexplained is the advantages, taken before
+        # normalisation.
+        explained_variances = _explained_variances(return_targets, advantages)
+        baseline_explained_variances = explained_variances[:0]
+        if baseline_inputs is not None:
+            with torch.no_grad():
+                advantages = return_targets - self._baselines(
+                    observations, baseline_inputs
+                )
+            baseline_explained_variances = _explained_variances(
+                return_targets, advantages
+            )
+        # The statistics include this batch; the networks learn on their scale.
+        normalized_targets = self.value_normalizer.normalize(
+            return_targets, update_statistics=True
         )
 
-        # Normalize once over the full batch, never independently per minibatch.
-        # Nearly constant advantages are kept as they are rather than divided
-        # by almost zero; torch.where makes that choice on the device.
-        advantage_standard_deviation = advantages.std(correction=0)
+        # Normalize once over the full batch, never independently per
+        # minibatch, each critic's column on its own. Nearly constant
+        # advantages are kept as they are rather than divided by almost zero;
+        # torch.where makes that choice on the device.
+        advantage_standard_deviation = advantages.std(dim=0, correction=0)
         advantages = torch.where(
             advantage_standard_deviation > torch.finfo(advantages.dtype).eps,
-            (advantages - advantages.mean()) / advantage_standard_deviation,
+            (advantages - advantages.mean(dim=0)) / advantage_standard_deviation,
             advantages,
         )
+        # One advantage for the actor: each critic's, weighted.
+        combined_advantages = advantages @ self.advantage_weights
 
         # The five measurements, added up over all minibatches on the device.
         measurement_totals = torch.zeros(5, device=self.device)
@@ -281,33 +394,55 @@ class PPO:
                     observations[minibatch_indices],
                     policy_actions[minibatch_indices],
                     old_log_probabilities[minibatch_indices],
-                    advantages[minibatch_indices],
-                    return_targets[minibatch_indices],
+                    combined_advantages[minibatch_indices],
+                    normalized_targets[minibatch_indices],
                     None
                     if next_observations is None
                     else next_observations[minibatch_indices],
+                    None
+                    if baseline_inputs is None
+                    else baseline_inputs[minibatch_indices],
                 )
                 minibatch_count += 1
 
         # The only conversion to Python numbers: once, after all minibatches.
         summary = torch.cat(
-            (measurement_totals / minibatch_count, explained_variance.reshape(1))
+            (
+                measurement_totals / minibatch_count,
+                explained_variances,
+                baseline_explained_variances,
+            )
+        ).tolist()
+        critic_count = len(self.critic_networks)
+        return PPOUpdateSummary(
+            *summary[:5],
+            explained_variance=summary[5],
+            explained_variances=tuple(summary[5 : 5 + critic_count]),
+            baseline_explained_variances=tuple(summary[5 + critic_count :]),
         )
-        return PPOUpdateSummary(*summary.tolist())
 
     def state_dict(self) -> dict[str, Any]:
         """Everything training changes, for checkpoints.
 
-        Both networks, both optimizers, and the random generator. As with
-        PyTorch's own ``state_dict``, the tensors are the live ones: save the
-        result right away, or copy it. The settings are not included; restore
-        into a PPO built with the same settings and network sizes.
+        The networks (several critics as a list, in order, and the baselines,
+        if any), both optimizers, the value normaliser, and the random
+        generator. As with PyTorch's own ``state_dict``, the tensors are the
+        live ones: save the result right away, or copy it. The settings are not
+        included; restore into a PPO built with the same settings and network
+        sizes.
         """
+        critic_states = [critic.state_dict() for critic in self.critic_networks]
         return {
             "actor_network": self.actor_network.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
-            "critic_network": self.critic_network.state_dict(),
+            "critic_network": critic_states
+            if self.several_critics
+            else critic_states[0],
+            "baseline_networks": [
+                baseline.state_dict() for baseline in self.baseline_networks
+            ],
             "critic_optimizer": self.critic_optimizer.state_dict(),
+            "value_normalizer": self.value_normalizer.state_dict(),
             "generator": self.generator.get_state(),
             "generator_device_type": self.device.type,
         }
@@ -317,12 +452,23 @@ class PPO:
 
         The generator is restored only if it was saved on the same kind of
         device: CPU and CUDA generators draw different sequences, so on another
-        device it keeps the sequence this PPO was created with.
+        device it keeps the sequence this PPO was created with. A state saved
+        before baselines and value normalisation existed holds neither.
         """
         self.actor_network.load_state_dict(state["actor_network"])
         self.actor_optimizer.load_state_dict(state["actor_optimizer"])
-        self.critic_network.load_state_dict(state["critic_network"])
+        critic_states = state["critic_network"]
+        if not self.several_critics:
+            critic_states = [critic_states]
+        for network, network_state in zip(
+            self.critic_networks + self.baseline_networks,
+            [*critic_states, *state.get("baseline_networks", [])],
+            strict=True,
+        ):
+            network.load_state_dict(network_state)
         self.critic_optimizer.load_state_dict(state["critic_optimizer"])
+        if "value_normalizer" in state:
+            self.value_normalizer.load_state_dict(state["value_normalizer"])
         if state["generator_device_type"] == self.device.type:
             self.generator.set_state(state["generator"].cpu())
 
@@ -334,12 +480,17 @@ class PPO:
         advantages: torch.Tensor,
         return_targets: torch.Tensor,
         next_observations: torch.Tensor | None = None,
+        baseline_inputs: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Take one clipped actor step and one critic step on a minibatch.
+        """Take one clipped actor step and one step of every critic and
+        baseline on a minibatch.
 
-        Returns the five minibatch measurements, in the order of the first five
-        fields of ``PPOUpdateSummary``, as one detached tensor, so that
-        ``update`` can add them up on the device without waiting for it.
+        ``advantages`` is the actor's, ``(B,)``; ``return_targets`` the
+        critics' and baselines', ``(B, K)``, or ``(B,)`` for a single critic,
+        already normalised. Returns the five minibatch measurements, in the
+        order of the first five fields of ``PPOUpdateSummary``, as one detached
+        tensor, so that ``update`` can add them up on the device without
+        waiting for it.
         """
 
         # Re-evaluate the collected actions under the current, changing policy.
@@ -387,20 +538,72 @@ class PPO:
             )
 
         # Return targets were calculated before optimization and remain fixed.
-        predicted_values = self.critic_network(observations)
-        value_errors = return_targets - predicted_values
-        critic_loss = 0.5 * value_errors.square().mean()
+        # Each critic and baseline learns its column; their losses add up, and
+        # since they share no parameter, each gets only its own gradient.
+        return_targets = return_targets.reshape(len(observations), -1)
+        value_errors = return_targets - _outputs(self.critic_networks, observations)
+        if baseline_inputs is not None:
+            baseline_errors = return_targets - _outputs(
+                self.baseline_networks,
+                torch.cat((observations, baseline_inputs), dim=-1),
+            )
+            value_errors = torch.cat((value_errors, baseline_errors), dim=-1)
+        critic_loss = 0.5 * value_errors.square().mean(dim=0).sum()
 
-        # Actor and critic have independent networks and optimizers.
+        # Actor, critics and baselines have independent networks; each
+        # network's gradients are clipped on their own.
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
-        clip_gradients(self.actor_network.parameters(), self.max_gradient_norm)
-        clip_gradients(self.critic_network.parameters(), self.max_gradient_norm)
+        for network in (
+            self.actor_network,
+            *self.critic_networks,
+            *self.baseline_networks,
+        ):
+            clip_gradients(network.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
         return torch.stack(
             (actor_loss, critic_loss, mean_entropy, approximate_kl, clip_fraction)
         ).detach()
+
+    def _values(self, observations: torch.Tensor) -> torch.Tensor:
+        """The critic's values, ``(B,)``, or every critic's, ``(B, K)``, as
+        returns."""
+        values = self.value_normalizer.denormalize(
+            _outputs(self.critic_networks, observations)
+        )
+        return values if self.several_critics else values[:, 0]
+
+    def _baselines(
+        self, observations: torch.Tensor, baseline_inputs: torch.Tensor
+    ) -> torch.Tensor:
+        """Every baseline's value, ``(B, K)``, as returns."""
+        return self.value_normalizer.denormalize(
+            _outputs(
+                self.baseline_networks,
+                torch.cat((observations, baseline_inputs), dim=-1),
+            )
+        )
+
+
+def _outputs(
+    networks: Sequence[StateValueNetwork], inputs: torch.Tensor
+) -> torch.Tensor:
+    """Each network's output for every input, one column each, ``(B, K)``."""
+    return torch.stack([network(inputs) for network in networks], dim=-1)
+
+
+def _explained_variances(
+    return_targets: torch.Tensor, residuals: torch.Tensor
+) -> torch.Tensor:
+    """Each column's ``1 - Var(residuals) / Var(return_targets)``, ``(K,)``;
+    NaN where every return target is the same."""
+    return_target_variance = return_targets.var(dim=0, correction=0)
+    return torch.where(
+        return_target_variance > 0,
+        1 - residuals.var(dim=0, correction=0) / return_target_variance,
+        math.nan,
+    )

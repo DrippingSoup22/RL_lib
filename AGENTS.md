@@ -21,7 +21,9 @@ from it. Changes a Centipede workspace needs go on an RL_lib branch with the
 workspace's name, never on `master`, unless the user decides a change is
 general. `oscillators` holds the Centipede oscillators' additions (noise
 scales, several critics, action masks, a λ per step, a β per action
-component). The Centipede imports this folder, so both checkouts must be on
+component); `cooperators` the cooperators' (several critics, baselines that
+see more than the actor, value normalisation). The Centipede imports this
+folder, so both checkouts must be on
 matching branches; its launcher packs both.
 
 ## Code

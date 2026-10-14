@@ -64,6 +64,55 @@ def make_continuous_agent(
     )
 
 
+def linear_baseline() -> StateValueNetwork:
+    """Value 0.5 + x0 + 2 x1 + 3 e, with e one extra input."""
+    baseline_network = StateValueNetwork(3, hidden_sizes=())
+    with torch.no_grad():
+        baseline_network.network[0].weight.copy_(torch.tensor([[1.0, 2.0, 3.0]]))
+        baseline_network.network[0].bias.fill_(0.5)
+    return baseline_network
+
+
+def make_two_critic_agent(
+    *, optimizer=torch.optim.SGD, seed=0, baselines=False, **settings
+) -> PPO:
+    """Continuous PPO with two linear critics, whose advantages weigh 1 and 0.2;
+    with ``baselines``, each critic has a linear baseline."""
+    actor_network = GaussianPolicyNetwork(2, 2, hidden_sizes=(), initial_std=0.5)
+    critics = [linear_critic(), linear_critic()]
+    baseline_networks = [linear_baseline(), linear_baseline()] if baselines else []
+    critic_parameters = [
+        parameter
+        for network in critics + baseline_networks
+        for parameter in network.parameters()
+    ]
+    return PPO(
+        actor_network,
+        optimizer(actor_network.parameters(), lr=0.1),
+        critics,
+        optimizer(critic_parameters, lr=0.1),
+        seed=seed,
+        action_low=[-2.0, 0.0],
+        action_high=[2.0, 10.0],
+        advantage_weights=[1.0, 0.2],
+        baseline_networks=baseline_networks,
+        **settings,
+    )
+
+
+def recorded_actor_advantages(agent: PPO, monkeypatch) -> list[torch.Tensor]:
+    """The actor's advantages of every minibatch the agent takes from now on."""
+    advantages = []
+    update_minibatch = agent._update_minibatch
+
+    def record_minibatch(*arguments):
+        advantages.append(arguments[3])
+        return update_minibatch(*arguments)
+
+    monkeypatch.setattr(agent, "_update_minibatch", record_minibatch)
+    return advantages
+
+
 def minibatch(agent, policy_actions, old_log_probabilities, advantages, targets):
     """One minibatch step on observations of zeros; returns the measurements."""
     measurements = agent._update_minibatch(
@@ -221,7 +270,9 @@ def test_update_normalizes_advantages_once_and_uses_every_sample_each_epoch(
     agent = make_agent()
     minibatches = []
 
-    def record_minibatch(observations, _actions, _old, advantages, _targets, _next):
+    def record_minibatch(
+        observations, _actions, _old, advantages, _targets, _next, _baseline_inputs
+    ):
         minibatches.append((observations[:, 0].tolist(), advantages.tolist()))
         return torch.arange(5.0)
 
@@ -288,7 +339,110 @@ def test_update_reports_how_much_return_variance_the_values_explained() -> None:
     assert math.isnan(explained_variance([1.0, 2.0, 3.0], [5.0, 5.0, 5.0]))
 
 
-@pytest.mark.parametrize("make", (make_agent, make_continuous_agent))
+def test_each_critic_learns_its_own_return_and_weighs_its_normalised_advantage(
+    monkeypatch,
+) -> None:
+    agent = make_two_critic_agent()
+    observations = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    sample = agent.sample_action(observations)
+    assert sample.value.shape == (3, 2)
+    # The second critic's advantages are ten times the first's and reversed;
+    # each is normalised on its own, so only its weight sets its share.
+    advantages = torch.tensor([[1.0, 30.0], [2.0, 20.0], [3.0, 10.0]])
+    actor_advantages = recorded_actor_advantages(agent, monkeypatch)
+
+    summary = agent.update(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        advantages,
+        sample.value + advantages,
+        update_epochs=1,
+        minibatch_size=3,
+    )
+
+    normalised = torch.tensor([-1.0, 0.0, 1.0]) * math.sqrt(1.5)
+    torch.testing.assert_close(
+        actor_advantages[0].sort().values,
+        (normalised - 0.2 * normalised).sort().values,
+    )
+    # Both critics started equal; each moved toward its own targets.
+    values = agent.state_value(observations)
+    assert not torch.allclose(values[:, 0], values[:, 1])
+    assert summary.explained_variances[0] == summary.explained_variance
+    assert len(summary.explained_variances) == 2
+
+
+def test_baselines_give_the_actor_return_targets_minus_baselines(monkeypatch) -> None:
+    agent = make_two_critic_agent(baselines=True)
+    observations = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    extra_inputs = torch.tensor([[1.0], [0.0], [-1.0]])
+    sample = agent.sample_action(observations)
+    # Both baselines are 3.5, 1.5 and -0.5; each critic has its own targets.
+    return_targets = torch.tensor([[4.5, 0.0], [1.5, 0.0], [-1.5, 3.0]])
+    actor_advantages = recorded_actor_advantages(agent, monkeypatch)
+    baseline_before = agent.baseline_networks[0].network[0].weight.detach().clone()
+
+    summary = agent.update(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        torch.zeros(3, 2),  # the critics' own advantages are not used
+        return_targets,
+        update_epochs=1,
+        minibatch_size=3,
+        baseline_inputs=extra_inputs,
+    )
+
+    first = torch.tensor([1.0, 0.0, -1.0])
+    second = torch.tensor([-3.5, -1.5, 3.5])
+    expected = sum(
+        weight * (part - part.mean()) / part.std(correction=0)
+        for weight, part in ((1.0, first), (0.2, second))
+    )
+    torch.testing.assert_close(
+        actor_advantages[0].sort().values, expected.sort().values
+    )
+    # The first targets vary by 6 around their mean; 2/3 is left unexplained.
+    assert summary.baseline_explained_variances[0] == pytest.approx(1 - (2 / 3) / 6)
+    assert len(summary.baseline_explained_variances) == 2
+    assert not torch.equal(
+        agent.baseline_networks[0].network[0].weight, baseline_before
+    )
+
+
+def test_value_normalization_lets_a_critic_learn_returns_of_any_scale() -> None:
+    agent = make_agent(value_normalization=True)
+    observations = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    return_targets = torch.tensor([1000.0, 1010.0, 1020.0])
+
+    agent.update(
+        observations,
+        torch.zeros(3, dtype=torch.long),
+        torch.full((3,), LOG_HALF),
+        torch.zeros(3),
+        return_targets,
+        update_epochs=400,
+        minibatch_size=3,
+    )
+
+    # The linear critic learned the standardised targets, -1.22, 0 and 1.22,
+    # and its values come back as returns.
+    torch.testing.assert_close(
+        agent.state_value(observations), return_targets, atol=0.05, rtol=0.0
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    (
+        make_agent,
+        make_continuous_agent,
+        lambda **settings: make_two_critic_agent(
+            baselines=True, value_normalization=True, **settings
+        ),
+    ),
+)
 def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
     observations = torch.randn(16, 2, generator=torch.Generator().manual_seed(0))
 
@@ -298,10 +452,11 @@ def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
             observations,
             sample.policy_action,
             sample.log_probability,
-            torch.linspace(-1.0, 1.0, 16),
+            torch.linspace(-1.0, 1.0, sample.value.numel()).reshape(sample.value.shape),
             sample.value + 1.0,
             update_epochs=2,
             minibatch_size=4,
+            baseline_inputs=observations[:, :1] if agent.baseline_networks else None,
         )
         return [sample.policy_action, *agent.state_dict()["actor_network"].values()]
 
@@ -373,7 +528,7 @@ def test_a_full_update_learns_from_sampled_data_on_the_networks_device(
         minibatch_size=4,
     )
 
-    assert all(math.isfinite(value) for value in dataclasses.astuple(summary))
+    assert all(math.isfinite(value) for value in dataclasses.astuple(summary)[:6])
     assert any(
         not torch.equal(before, after)
         for before, after in zip(
@@ -398,6 +553,8 @@ def test_constructor_rejects_invalid_settings() -> None:
         (gaussian, critic, {}),
         (gaussian, critic, {**bounds, "noise_beta": -1.0}),
         (gaussian, critic, {**bounds, "temporal_smoothness_coefficient": -0.1}),
+        (gaussian, critic, {**bounds, "advantage_weights": [1.0]}),
+        (gaussian, critic, {**bounds, "baseline_networks": [StateValueNetwork(2)]}),
     ):
         with pytest.raises(ValueError):
             PPO(

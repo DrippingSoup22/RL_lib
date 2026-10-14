@@ -20,8 +20,10 @@ class ObservationNormalizer:
     ``none`` leaves observations unchanged. ``bounds`` maps each value's known
     range ``[low, high]`` to ``[-1, 1]``. ``running`` subtracts the mean and
     divides by the standard deviation of the observations seen so far, then
-    clips to plus or minus ``clip_limit``; those statistics change only when
-    ``normalize`` is asked to update them.
+    clips to plus or minus ``clip_limit`` (``math.inf`` clips nothing); those
+    statistics change only when ``normalize`` is asked to update them.
+    ``denormalize`` turns normalised values back, for instance a critic's value
+    learned on normalised returns.
 
     The running statistics are ``observation_count``, the ``mean``, and
     ``squared_deviation_sum``, the sum of every observation's squared distance
@@ -55,8 +57,8 @@ class ObservationNormalizer:
             raise ValueError(f"mode must be one of {self.MODES}")
         if not math.isfinite(epsilon) or epsilon <= 0:
             raise ValueError("epsilon must be finite and positive")
-        if not math.isfinite(clip_limit) or clip_limit <= 0:
-            raise ValueError("clip_limit must be finite and positive")
+        if not clip_limit > 0:
+            raise ValueError("clip_limit must be positive")
 
         self.observation_size = observation_size
         self.mode = mode
@@ -130,6 +132,20 @@ class ObservationNormalizer:
         )
         clipped = standardized.clamp(-self.clip_limit, self.clip_limit)
         return clipped.to(observations.dtype)
+
+    def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
+        """The inverse of ``normalize`` without its clipping, shape
+        ``(..., observation_size)``, in the dtype of ``normalized``."""
+        if self.mode == "bounds":
+            assert self.low is not None and self.high is not None
+            center = (self.high + self.low) / 2
+            half_range = (self.high - self.low) / 2
+            return normalized * half_range + center
+        if self.mode == "none" or self.observation_count == 0:
+            return normalized
+        variance = self.squared_deviation_sum / self.observation_count
+        restored = normalized.double() * torch.sqrt(variance + self.epsilon) + self.mean
+        return restored.to(normalized.dtype)
 
     def _add_to_statistics(self, observations: torch.Tensor) -> None:
         """Merge a batch of observations into the running statistics.

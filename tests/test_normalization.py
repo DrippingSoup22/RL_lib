@@ -52,6 +52,8 @@ def test_running_normalization_standardizes_and_clips_without_changing_on_reques
     expected_first = ((data[0].double() - mean) / standard_deviation).float()
     torch.testing.assert_close(result[0], expected_first)
     torch.testing.assert_close(result[1], torch.full((3,), 2.0))
+    # Denormalising undoes everything but the clipping.
+    torch.testing.assert_close(normalizer.denormalize(result[0]), data[0])
     assert result.dtype == torch.float32
     assert normalizer.observation_count == 10  # not updated without the request
 
