@@ -94,7 +94,7 @@ class PPO:
         max_gradient_norm: float | None = None,
         action_low: torch.Tensor | Sequence[float] | None = None,
         action_high: torch.Tensor | Sequence[float] | None = None,
-        noise_beta: float = 0.0,
+        noise_beta: float | Sequence[float] = 0.0,
         noise_sequence_steps: int = COLORED_NOISE_STEPS,
         temporal_smoothness_coefficient: float = 0.0,
         advantage_weights: Sequence[float] | None = None,
@@ -174,7 +174,7 @@ class PPO:
         if isinstance(actor_network, CategoricalPolicyNetwork):
             if action_low is not None or action_high is not None:
                 raise ValueError("Categorical PPO must not receive action bounds")
-            if noise_beta:
+            if torch.as_tensor(noise_beta, dtype=torch.float32).any():
                 raise ValueError("Categorical PPO has no Gaussian noise to color")
             if temporal_smoothness_coefficient:
                 raise ValueError("Categorical PPO has no mean action to smooth")

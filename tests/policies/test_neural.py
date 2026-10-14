@@ -210,13 +210,14 @@ def test_colored_noise_is_standard_normal_and_drifts_more_as_beta_grows() -> Non
 
 
 def test_squashed_gaussian_policy_samples_with_colored_noise() -> None:
+    """Pink noise on the second component; the first stays white."""
     network = GaussianPolicyNetwork(2, 2, initial_std=0.5)
     policy = SquashedGaussianPolicy(
         network,
         [-1.0, -1.0],
         [1.0, 1.0],
         generator=torch.Generator().manual_seed(3),
-        noise_beta=1.0,
+        noise_beta=[0.0, 1.0],
     )
     observations = torch.randn(256, 2)
     with torch.no_grad():
@@ -226,9 +227,11 @@ def test_squashed_gaussian_policy_samples_with_colored_noise() -> None:
         [(policy.sample(observations)[1] - mean) / std for _ in range(100)]
     )
 
-    # Each sample's noise is standard normal, but follows the one before.
+    # Each sample's noise is standard normal; the pink one follows the one
+    # before, the white one does not.
     assert abs(noise.var().item() - 1) < 0.15
-    assert _lag_one_correlation(noise) > 0.5
+    assert _lag_one_correlation(noise[..., 1]) > 0.5
+    assert abs(_lag_one_correlation(noise[..., 0])) < 0.05
     # A different number of rows starts new sequences.
     assert policy.sample(observations[:3])[1].shape == (3, 2)
 
@@ -267,8 +270,11 @@ def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
     ):
         with pytest.raises(ValueError, match=message):
             SquashedGaussianPolicy(network, action_low, action_high)
-    with pytest.raises(ValueError, match="noise_beta"):
-        SquashedGaussianPolicy(network, [-1.0, -1.0], [1.0, 1.0], noise_beta=-1.0)
+    for noise_beta in (-1.0, [1.0, 1.0, 1.0]):
+        with pytest.raises(ValueError, match="noise_beta"):
+            SquashedGaussianPolicy(
+                network, [-1.0, -1.0], [1.0, 1.0], noise_beta=noise_beta
+            )
     with pytest.raises(ValueError, match="noise_sequence_steps"):
         SquashedGaussianPolicy(
             network, [-1.0, -1.0], [1.0, 1.0], noise_sequence_steps=1
