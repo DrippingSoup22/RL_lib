@@ -48,8 +48,13 @@ matching branches; its launcher packs both.
 - Don't test per-call argument checks or experiment plumbing: command-line
   options, defaults, seed presets, run folders, dashboards, metrics or CSV
   files.
-- After a change, run only the tests that cover it. Run the whole suite at the
-  end of a piece of work.
+- After a change, run only the tests that cover it (the user's rule,
+  2026-10-14: test runs are fast and targeted). A PPO change, for instance:
+  `make test TEST="tests/algorithms/policy_gradient/test_ppo.py
+  tests/algorithms/policy_gradient/test_advantages.py tests/policies
+  tests/networks tests/test_normalization.py"`, about 5 s, against 27 s for
+  the whole suite, whose slowest tests are A3C's processes. Run the whole
+  suite (`make check`) at the end of a piece of work and before a push.
 - End-to-end validation is a multi-seed Gymnasium experiment. Run the relevant
   component tests before one starts.
 - The user runs tuning and standard experiments. The assistant may run only
