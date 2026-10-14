@@ -43,8 +43,10 @@ class PPOUpdateSummary:
     several critics, ``critic_loss`` is the sum of theirs.
     ``explained_variance`` describes the critic that collected the batch,
     before the update: ``1 - Var(return_targets - values) / Var(return_targets)``
-    over the batch. It is 1 when the values predicted the return targets
-    exactly, 0 when they explained none of their variation, negative when they
+    over the batch, or with action masks over the samples that acted, where
+    the actor learns from its values. It is 1 when the values predicted the
+    return targets exactly, 0 when they explained none of their variation,
+    negative when they
     did worse than predicting the mean, and NaN when every return target is the
     same. With several critics it is the first critic's, and
     ``explained_variances`` holds every critic's, in order.
@@ -323,14 +325,28 @@ class PPO:
         advantages = advantages.reshape(batch_size, -1)
         column_targets = return_targets.reshape(batch_size, -1)
 
+        # The samples that teach the actor: with masks, those that acted.
+        acting = (
+            torch.ones(batch_size, device=self.device)
+            if action_masks is None
+            else action_masks.any(dim=-1).float()
+        )
+        acting_count = acting.sum().clamp(min=1.0)
+
         # How well the critics that collected the batch predicted their
-        # returns. Return targets are advantages plus values, so the part the
-        # values left unexplained is the advantages, taken before
-        # normalisation.
-        return_target_variance = column_targets.var(dim=0, correction=0)
+        # returns where the actor learns from them. Return targets are
+        # advantages plus values, so the part the values left unexplained is
+        # the advantages, taken before normalisation.
+        def acting_mean(columns: torch.Tensor) -> torch.Tensor:
+            return (columns * acting[:, None]).sum(dim=0) / acting_count
+
+        def acting_variance(columns: torch.Tensor) -> torch.Tensor:
+            return acting_mean((columns - acting_mean(columns)).square())
+
+        return_target_variance = acting_variance(column_targets)
         explained_variances = torch.where(
             return_target_variance > 0,
-            1 - advantages.var(dim=0, correction=0) / return_target_variance,
+            1 - acting_variance(advantages) / return_target_variance,
             math.nan,
         )
 
@@ -338,17 +354,8 @@ class PPO:
         # minibatch, and only over the samples that teach the actor. Nearly
         # constant advantages are kept as they are rather than divided by
         # almost zero; torch.where makes that choice on the device.
-        acting = (
-            torch.ones(batch_size, device=self.device)
-            if action_masks is None
-            else action_masks.any(dim=-1).float()
-        )
-        acting_count = acting.sum().clamp(min=1.0)
-        advantage_mean = (advantages * acting[:, None]).sum(dim=0) / acting_count
-        advantage_standard_deviation = (
-            ((advantages - advantage_mean).square() * acting[:, None]).sum(dim=0)
-            / acting_count
-        ).sqrt()
+        advantage_mean = acting_mean(advantages)
+        advantage_standard_deviation = acting_variance(advantages).sqrt()
         advantages = torch.where(
             advantage_standard_deviation > torch.finfo(advantages.dtype).eps,
             (advantages - advantage_mean) / advantage_standard_deviation,

@@ -413,6 +413,28 @@ def test_samples_that_acted_in_nothing_never_move_the_actor() -> None:
     assert weight_change[1].abs().sum() > 0 and weight_change[0].abs().sum() == 0
 
 
+def test_with_masks_the_explained_variance_covers_the_samples_that_acted() -> None:
+    """The two acting samples' returns were predicted exactly; the third,
+    acting in nothing, missed by 49, and is left out."""
+    observations = torch.zeros(3, 2)
+    action_masks = torch.tensor([[1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+    agent = make_continuous_agent()
+    sample = agent.sample_action(observations, action_mask=action_masks)
+
+    summary = agent.update(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        torch.tensor([0.0, 0.0, 49.0]),
+        torch.tensor([1.0, 2.0, 50.0]),
+        update_epochs=1,
+        minibatch_size=3,
+        action_masks=action_masks,
+    )
+
+    assert summary.explained_variance == 1.0
+
+
 @pytest.mark.parametrize(
     "make", (make_agent, make_continuous_agent, make_two_critic_agent)
 )
