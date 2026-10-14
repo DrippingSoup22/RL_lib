@@ -413,6 +413,36 @@ def test_samples_that_acted_in_nothing_never_move_the_actor() -> None:
     assert weight_change[1].abs().sum() > 0 and weight_change[0].abs().sum() == 0
 
 
+def test_with_masks_the_minibatches_follow_the_samples_that_acted() -> None:
+    """60 samples, 12 of them acting, minibatches of 4 acting samples: 3
+    minibatches of 20 samples per epoch, not 15 of 4."""
+    observations = torch.randn(60, 2, generator=torch.Generator().manual_seed(0))
+    action_masks = torch.zeros(60, 2)
+    action_masks[::5] = 1.0
+    agent = make_continuous_agent()
+    sample = agent.sample_action(observations, action_mask=action_masks)
+    sizes = []
+    update_minibatch = agent._update_minibatch
+
+    def counting_update(*arguments):
+        sizes.append(arguments[0].shape[0])
+        return update_minibatch(*arguments)
+
+    agent._update_minibatch = counting_update
+    agent.update(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        torch.randn(60, generator=torch.Generator().manual_seed(1)),
+        sample.value,
+        update_epochs=2,
+        minibatch_size=4,
+        action_masks=action_masks,
+    )
+
+    assert sizes == [20, 20, 20] * 2
+
+
 def test_with_masks_the_explained_variance_covers_the_samples_that_acted() -> None:
     """The two acting samples' returns were predicted exactly; the third,
     acting in nothing, missed by 49, and is left out."""

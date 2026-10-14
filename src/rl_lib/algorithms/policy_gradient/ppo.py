@@ -289,8 +289,9 @@ class PPO:
         under the distribution it was drawn from. With masks, only the
         samples that acted at all, those with a component marked, teach the
         actor: its loss, entropy, KL and clip fraction are means over them,
-        and the advantages are normalised over them; every sample teaches the
-        critics.
+        the advantages are normalised over them, and an epoch takes as many
+        minibatches as they fill at ``minibatch_size`` each, at least one;
+        every sample teaches the critics.
         """
         if update_epochs < 1:
             raise ValueError("Update epochs must be positive")
@@ -364,6 +365,17 @@ class PPO:
         # One advantage for the actor: each critic's, weighted.
         combined_advantages = advantages @ self.advantage_weights
 
+        # With masks only the samples that acted teach the actor, so they set
+        # how many minibatches an epoch takes: each holds about
+        # ``minibatch_size`` of them, among samples that teach only the
+        # critics. Counted over every sample, rare actions would give the
+        # actor many steps on a few noisy samples each. Counting them is the
+        # update's one wait for the device.
+        minibatch_step = minibatch_size
+        if action_masks is not None:
+            minibatches = max(1, round(acting.sum().item() / minibatch_size))
+            minibatch_step = math.ceil(batch_size / minibatches)
+
         # The five measurements, added up over all minibatches on the device.
         measurement_totals = torch.zeros(5, device=self.device)
         minibatch_count = 0
@@ -372,9 +384,9 @@ class PPO:
             shuffled_indices = torch.randperm(
                 batch_size, generator=self.generator, device=self.device
             )
-            for minibatch_start in range(0, batch_size, minibatch_size):
+            for minibatch_start in range(0, batch_size, minibatch_step):
                 minibatch_indices = shuffled_indices[
-                    minibatch_start : minibatch_start + minibatch_size
+                    minibatch_start : minibatch_start + minibatch_step
                 ]
                 measurement_totals += self._update_minibatch(
                     observations[minibatch_indices],
