@@ -13,6 +13,17 @@ coverage without framework-level complexity.
   Q-learning.
 - Policy gradients: REINFORCE with baseline, A2C, A3C, TRPO and PPO.
 
+## Branches
+
+The user's decision, 2026-10-14. `master` is the general library, kept
+pristine: it serves the Centipede's `main` branch, and every new branch starts
+from it. Changes a Centipede workspace needs go on an RL_lib branch with the
+workspace's name, never on `master`, unless the user decides a change is
+general. `oscillators` holds the Centipede oscillators' additions (noise
+scales, several critics, action masks, a λ per step, a β per action
+component). The Centipede imports this folder, so both checkouts must be on
+matching branches; its launcher packs both.
+
 ## Code
 
 - Explain the mathematical update before the code.
