@@ -67,6 +67,33 @@ def test_gaussian_network_can_learn_one_global_standard_deviation() -> None:
     assert network.log_std.grad is not None
 
 
+def test_gsde_network_weighs_its_spreads_by_the_squared_unit_features() -> None:
+    network = GaussianPolicyNetwork(
+        3, 2, hidden_sizes=(4,), initial_std=0.5, std_mode="gsde", activation="tanh"
+    )
+    observations = torch.randn(6, 3)
+
+    _, equal_spreads, unit_features = network.forward_with_features(observations)
+    spreads = torch.tensor([[0.1, 1.0], [0.2, 1.0], [0.3, 1.0], [0.4, 1.0]])
+    with torch.no_grad():
+        network.log_std.copy_(spreads.log())
+    _, standard_deviation = network(observations)
+
+    # One spread per feature and action; spreads all equal give that spread in
+    # every state, others weighed by the squared unit-length features.
+    torch.testing.assert_close(unit_features.norm(dim=-1), torch.ones(6))
+    torch.testing.assert_close(
+        equal_spreads, torch.full((6, 2), 0.5), atol=1e-5, rtol=0
+    )
+    torch.testing.assert_close(
+        standard_deviation, (unit_features.square() @ spreads.square() + 1e-6).sqrt()
+    )
+    # The spreads learn; the hidden layers only through the mean.
+    standard_deviation.sum().backward()
+    assert network.log_std.grad is not None
+    assert network.mean_network[0].weight.grad is None
+
+
 def test_gaussian_network_applies_its_hidden_activation() -> None:
     # One hidden unit that receives -1: ReLU passes on 0, tanh passes on tanh(-1).
     for activation, expected_mean in (("relu", 0.0), ("tanh", math.tanh(-1.0))):

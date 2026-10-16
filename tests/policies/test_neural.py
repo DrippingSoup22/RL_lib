@@ -215,6 +215,43 @@ def test_colored_noise_starts_new_sequences_every_noise_sequence_steps() -> None
     assert abs(_lag_one_correlation(noise[7:9])) < 0.06
 
 
+def test_gsde_noise_follows_the_state_through_a_matrix_held_for_some_steps() -> None:
+    network = GaussianPolicyNetwork(
+        3, 2, hidden_sizes=(8,), initial_std=0.5, std_mode="gsde", activation="tanh"
+    )
+    policy = SquashedGaussianPolicy(
+        network,
+        [-1.0, -1.0],
+        [1.0, 1.0],
+        generator=torch.Generator().manual_seed(5),
+        exploration_matrix_steps=3,
+    )
+    observations = torch.randn(4096, 3)
+    moved = observations + 1.0
+    with torch.no_grad():
+        mean, std = network(observations)
+        moved_mean, moved_std = network(moved)
+
+    first, second, third, fourth = (policy.sample(observations) for _ in range(4))
+    after_moving = policy.sample(moved)
+
+    def noise(sample, mean=mean, std=std):
+        return (sample[1] - mean) / std
+
+    # While a matrix lasts the same state gets the same noise; for each state
+    # it is standard normal, and its log-probability is the one PPO evaluates.
+    torch.testing.assert_close(noise(first), noise(third))
+    assert abs(noise(first).var().item() - 1) < 0.1
+    torch.testing.assert_close(
+        first[2], policy.evaluate_actions(observations, first[1])[0]
+    )
+    # The fourth sample draws new matrices, and with the same matrix another
+    # state gets other noise.
+    assert (noise(fourth) - noise(first)).abs().mean() > 0.5
+    moved_noise = noise(after_moving, moved_mean, moved_std)
+    assert (moved_noise - noise(fourth)).abs().mean() > 0.3
+
+
 def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
     network = GaussianPolicyNetwork(3, 2, hidden_sizes=())
     for action_low, action_high, message in (
@@ -231,3 +268,10 @@ def test_squashed_gaussian_policy_rejects_invalid_settings() -> None:
         SquashedGaussianPolicy(
             network, [-1.0, -1.0], [1.0, 1.0], noise_sequence_steps=1
         )
+    with pytest.raises(ValueError, match="exploration_matrix_steps"):
+        SquashedGaussianPolicy(
+            network, [-1.0, -1.0], [1.0, 1.0], exploration_matrix_steps=0
+        )
+    gsde_network = GaussianPolicyNetwork(3, 2, hidden_sizes=(), std_mode="gsde")
+    with pytest.raises(ValueError, match="color"):
+        SquashedGaussianPolicy(gsde_network, [-1.0, -1.0], [1.0, 1.0], noise_beta=1.0)

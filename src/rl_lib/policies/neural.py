@@ -129,6 +129,17 @@ class SquashedGaussianPolicy:
     afresh when the number of rows changes. The default, 1,000 steps, is
     Hollenstein et al.'s; Eberhard et al.'s code (ICLR 2023) makes a sequence
     as long as the task's episodes.
+
+    A network with ``std_mode = "gsde"`` explores with generalized
+    state-dependent noise instead (``GaussianPolicyNetwork``): each row draws
+    an exploration matrix and keeps it for ``exploration_matrix_steps`` calls
+    of ``sample``, drawing a new one after them or when the number of rows
+    changes, so that while a matrix lasts the same state always gets the same
+    noise, and the noise changes only as the state does (Raffin, Kober and
+    Stulp, CoRL 2021). For a given state that noise is normal with the
+    standard deviation the network returns, so its log-probability is the
+    usual one; Raffin et al. compute it the same way. Its noise cannot be
+    colored.
     """
 
     def __init__(
@@ -140,6 +151,7 @@ class SquashedGaussianPolicy:
         generator: torch.Generator | None = None,
         noise_beta: float = 0.0,
         noise_sequence_steps: int = COLORED_NOISE_STEPS,
+        exploration_matrix_steps: int = 1,
     ) -> None:
         # The bounds come from outside, usually an environment's action space,
         # so they are checked once, here, on the CPU.
@@ -160,13 +172,20 @@ class SquashedGaussianPolicy:
             raise ValueError("noise_beta must be finite and nonnegative")
         if noise_sequence_steps < 2:
             raise ValueError("noise_sequence_steps must be at least 2")
+        if exploration_matrix_steps < 1:
+            raise ValueError("exploration_matrix_steps must be at least 1")
+        if network.std_mode == "gsde" and noise_beta:
+            raise ValueError("gSDE noise cannot take a noise_beta color")
 
         self.network = network
         self.generator = generator
         self.noise_beta = noise_beta
         self.noise_sequence_steps = noise_sequence_steps
-        # The colored-noise sequences being used, and how many steps of them.
+        self.exploration_matrix_steps = exploration_matrix_steps
+        # The colored-noise sequences or gSDE's exploration matrices being
+        # used, and how many steps of them.
         self._noise_sequences: torch.Tensor | None = None
+        self._exploration_matrices: torch.Tensor | None = None
         self._noise_steps_used = 0
         device = next(network.parameters()).device
         self.scale = ((high - low) / 2).to(device)
@@ -229,6 +248,32 @@ class SquashedGaussianPolicy:
         noise = sequences[self._noise_steps_used]
         self._noise_steps_used += 1
         return noise
+
+    def _next_state_dependent_noise(
+        self,
+        unit_features: torch.Tensor,
+        standard_deviation: torch.Tensor,
+    ) -> torch.Tensor:
+        # gSDE's noise from each row's exploration matrix, drawing new ones
+        # when they are used up or the rows change, given as standard normal
+        # noise: divided by the standard deviation it has in this state.
+        matrices = self._exploration_matrices
+        shape = (*unit_features.shape, standard_deviation.shape[-1])
+        if (
+            matrices is None
+            or matrices.shape != shape
+            or self._noise_steps_used == self.exploration_matrix_steps
+        ):
+            matrices = self._exploration_matrices = torch.randn(
+                shape,
+                dtype=unit_features.dtype,
+                device=unit_features.device,
+                generator=self.generator,
+            )
+            self._noise_steps_used = 0
+        self._noise_steps_used += 1
+        noise = self.network.state_dependent_noise(unit_features, matrices)
+        return noise / standard_deviation
 
     def _log_probability(
         self,
@@ -296,13 +341,18 @@ class SquashedGaussianPolicy:
         self,
         observation: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        distribution = self._distribution(observation)
+        mean, std, unit_features = self.network.forward_with_features(observation)
+        distribution = torch.distributions.Normal(mean, std, validate_args=False)
 
         # Keep the raw sample for stable probability evaluation. It is detached,
         # like Normal.sample: the sampled action is data, not a function of the
-        # network. Only these samples use colored noise; the entropy estimate
-        # always draws white noise.
-        noise = self._next_colored_noise(distribution.loc) if self.noise_beta else None
+        # network. Only these samples use colored or state-dependent noise; the
+        # entropy estimate always draws white noise.
+        noise = None
+        if unit_features is not None:
+            noise = self._next_state_dependent_noise(unit_features, std)
+        elif self.noise_beta:
+            noise = self._next_colored_noise(mean)
         latent_action = self._draw_latent_action(distribution, noise).detach()
 
         # Only the bounded and rescaled action is sent to the environment.
