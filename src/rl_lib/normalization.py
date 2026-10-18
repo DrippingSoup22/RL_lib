@@ -30,6 +30,15 @@ class ObservationNormalizer:
     from the mean, so that the variance is ``squared_deviation_sum /
     observation_count``. They are float64 to stay precise over millions of
     observations.
+
+    **Forgetting.** By default every observation ever added weighs the same,
+    so statistics that drift are followed ever more slowly. With a
+    ``horizon`` of H, before each batch of B observations is added the old
+    statistics are made to count as at most H - 1 batches of B: their count
+    falls to (H - 1) B and their squared deviation sum with it, their mean and
+    variance unchanged. The merge then moves the mean a share B / (H B) = 1/H
+    of the way to the batch's, and the variance likewise: an exponential
+    moving average over about the last H batches.
     """
 
     MODES = ("none", "bounds", "running")
@@ -43,13 +52,15 @@ class ObservationNormalizer:
         high: torch.Tensor | None = None,
         epsilon: float = 1e-8,
         clip_limit: float = 10.0,
+        horizon: int = 0,
         device: torch.device | str = "cpu",
     ) -> None:
         """Check the settings once and start with empty statistics.
 
         ``low`` and ``high`` are required in ``bounds`` mode and rejected in the
         others. ``epsilon`` keeps the division defined for a value that never
-        varies.
+        varies. ``horizon``, in batches, makes ``running`` statistics forget
+        (0: never).
         """
         if observation_size <= 0:
             raise ValueError("Observation size must be positive")
@@ -59,11 +70,14 @@ class ObservationNormalizer:
             raise ValueError("epsilon must be finite and positive")
         if not clip_limit > 0:
             raise ValueError("clip_limit must be positive")
+        if horizon < 0:
+            raise ValueError("horizon must be nonnegative")
 
         self.observation_size = observation_size
         self.mode = mode
         self.epsilon = float(epsilon)
         self.clip_limit = float(clip_limit)
+        self.horizon = int(horizon)
         self.device = torch.device(device)
 
         # Running statistics, used only in ``running`` mode.
@@ -158,6 +172,13 @@ class ObservationNormalizer:
         """
         batch = observations.reshape(-1, self.observation_size).double()
         batch_count = batch.shape[0]
+        # Forgetting: the old statistics count as at most horizon - 1 batches.
+        kept = (self.horizon - 1) * batch_count
+        if self.horizon and self.observation_count > kept:
+            self.squared_deviation_sum = self.squared_deviation_sum * (
+                kept / self.observation_count
+            )
+            self.observation_count = kept
         batch_mean = batch.mean(dim=0)
         batch_squared_deviation_sum = (batch - batch_mean).square().sum(dim=0)
 
@@ -190,6 +211,7 @@ class ObservationNormalizer:
             "mode": self.mode,
             "epsilon": self.epsilon,
             "clip_limit": self.clip_limit,
+            "horizon": self.horizon,
             "observation_count": self.observation_count,
             "mean": cpu_copy(self.mean),
             "squared_deviation_sum": cpu_copy(self.squared_deviation_sum),
@@ -212,6 +234,8 @@ class ObservationNormalizer:
             high=state["high"],
             epsilon=float(state["epsilon"]),
             clip_limit=float(state["clip_limit"]),
+            # Saved before forgetting existed: never.
+            horizon=int(state.get("horizon", 0)),
             device=device,
         )
         normalizer.load_state_dict(state)

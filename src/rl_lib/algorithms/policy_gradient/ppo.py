@@ -96,7 +96,11 @@ class PPO:
     baselines learn their return targets standardised by each critic's running
     mean and spread, and their outputs are turned back into returns (MAPPO's
     first advice: Yu et al., NeurIPS 2022), so that a reward's units never set
-    the scale the networks must learn.
+    the scale the networks must learn. That mean and spread weigh every target
+    since the start alike, unless ``value_normalization_horizon`` makes them
+    forget: an exponential average over about that many updates, so that the
+    scale follows returns that change as the policy learns
+    (``ObservationNormalizer``'s horizon).
     """
 
     def __init__(
@@ -119,6 +123,7 @@ class PPO:
         advantage_weights: Sequence[float] | None = None,
         baseline_networks: Sequence[StateValueNetwork] = (),
         value_normalization: bool = False,
+        value_normalization_horizon: int = 0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
@@ -211,6 +216,7 @@ class PPO:
             len(critic_networks),
             "running" if value_normalization else "none",
             clip_limit=math.inf,
+            horizon=value_normalization_horizon,
             device=self.device,
         )
 

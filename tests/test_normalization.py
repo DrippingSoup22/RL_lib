@@ -58,6 +58,29 @@ def test_running_normalization_standardizes_and_clips_without_changing_on_reques
     assert normalizer.observation_count == 10  # not updated without the request
 
 
+def test_a_horizon_forgets_so_that_each_batch_moves_the_statistics_one_horizonth():
+    """Horizon 2, batches of four: 0, then 10 twice. The old statistics count
+    as one batch, so each batch moves the mean half of the way to its own: 0,
+    5, 7.5; the variance follows the same average, the means' spread included:
+    0, 25, then 25/2 + (10 - 5)^2/4 = 18.75. Saved and restored, the horizon
+    stays."""
+    normalizer = ObservationNormalizer(1, "running", horizon=2)
+    for value, mean, variance in (
+        (0.0, 0.0, 0.0),
+        (10.0, 5.0, 25.0),
+        (10.0, 7.5, 18.75),
+    ):
+        normalizer.normalize(torch.full((4, 1), value), update_statistics=True)
+        torch.testing.assert_close(
+            normalizer.mean, torch.tensor([mean], dtype=torch.float64)
+        )
+        torch.testing.assert_close(
+            normalizer.squared_deviation_sum / normalizer.observation_count,
+            torch.tensor([variance], dtype=torch.float64),
+        )
+    assert ObservationNormalizer.from_state_dict(normalizer.state_dict()).horizon == 2
+
+
 def test_bounds_map_low_and_high_to_minus_one_and_one() -> None:
     normalizer = ObservationNormalizer(
         2,
@@ -103,6 +126,7 @@ def test_constructor_rejects_invalid_settings() -> None:
         ((2, "unknown"), {}),
         ((2, "running"), {"epsilon": 0.0}),
         ((2, "running"), {"clip_limit": float("nan")}),
+        ((2, "running"), {"horizon": -1}),
         ((2, "bounds"), {}),
         ((2, "running"), {"low": bounds[0], "high": bounds[1]}),
         ((2, "bounds"), {"low": torch.zeros(3), "high": torch.ones(3)}),
