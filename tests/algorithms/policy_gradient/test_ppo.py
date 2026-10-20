@@ -71,6 +71,23 @@ def make_continuous_agent(
     )
 
 
+def make_two_critic_agent(*, optimizer=torch.optim.SGD, seed=0, **settings) -> PPO:
+    """Continuous PPO with two linear critics, whose advantages weigh 1 and 0.2."""
+    actor_network = GaussianPolicyNetwork(2, 2, hidden_sizes=(), initial_std=0.5)
+    critics = [linear_critic(), linear_critic()]
+    return PPO(
+        actor_network,
+        optimizer(actor_network.parameters(), lr=0.1),
+        critics,
+        optimizer([*critics[0].parameters(), *critics[1].parameters()], lr=0.1),
+        seed=seed,
+        action_low=[-2.0, 0.0],
+        action_high=[2.0, 10.0],
+        advantage_weights=[1.0, 0.2],
+        **settings,
+    )
+
+
 def make_gsde_agent(**settings) -> PPO:
     """Continuous PPO exploring with gSDE, each matrix held for two steps."""
     return make_continuous_agent(
@@ -302,7 +319,51 @@ def test_update_reports_how_much_return_variance_the_values_explained() -> None:
     assert math.isnan(explained_variance([1.0, 2.0, 3.0], [5.0, 5.0, 5.0]))
 
 
-@pytest.mark.parametrize("make", (make_agent, make_continuous_agent))
+def test_each_critic_learns_its_own_return_and_weighs_its_normalised_advantage(
+    monkeypatch,
+) -> None:
+    agent = make_two_critic_agent()
+    observations = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    sample = agent.sample_action(observations)
+    # The second channel's advantages are ten times the first's, and reversed.
+    advantages = torch.tensor([[1.0, 30.0], [2.0, 20.0], [3.0, 10.0]])
+    actor_advantages = []
+    update_minibatch = agent._update_minibatch
+
+    def record_minibatch(*arguments):
+        actor_advantages.append(arguments[3])
+        return update_minibatch(*arguments)
+
+    monkeypatch.setattr(agent, "_update_minibatch", record_minibatch)
+
+    summary = agent.update(
+        observations,
+        sample.policy_action,
+        sample.log_probability,
+        advantages,
+        sample.value + advantages,
+        update_epochs=1,
+        minibatch_size=3,
+    )
+
+    # Each channel's advantages are normalised on their own, so only its weight
+    # sets its share: the first's plus 0.2 times the second's, the first's
+    # reversed.
+    normalised = torch.tensor([-1.0, 0.0, 1.0]) * math.sqrt(1.5)
+    torch.testing.assert_close(
+        actor_advantages[0].sort().values, (0.8 * normalised).sort().values
+    )
+    # Both critics started equal, with values 0.5, 1.5 and 2.5; each moved
+    # towards its own targets, and each reports how much it explained.
+    torch.testing.assert_close(sample.value[:, 1], torch.tensor([0.5, 1.5, 2.5]))
+    values = agent.state_value(observations)
+    assert not torch.allclose(values[:, 0], values[:, 1])
+    assert summary.explained_variance == pytest.approx((0.75, 1 - (200 / 3) / 54))
+
+
+@pytest.mark.parametrize(
+    "make", (make_agent, make_continuous_agent, make_two_critic_agent)
+)
 def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
     observations = torch.randn(16, 2, generator=torch.Generator().manual_seed(0))
 
@@ -312,12 +373,16 @@ def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
             observations,
             sample.policy_action,
             sample.log_probability,
-            torch.linspace(-1.0, 1.0, 16),
+            torch.linspace(-1.0, 1.0, sample.value.numel()).reshape(sample.value.shape),
             sample.value + 1.0,
             update_epochs=2,
             minibatch_size=4,
         )
-        return [sample.policy_action, *agent.state_dict()["actor_network"].values()]
+        return [
+            sample.policy_action,
+            sample.value,
+            *agent.state_dict()["actor_network"].values(),
+        ]
 
     # Adam keeps state, so the optimizers' part of the checkpoint matters too.
     original = make(optimizer=torch.optim.Adam)
@@ -400,6 +465,7 @@ def test_constructor_rejects_invalid_settings() -> None:
     categorical = CategoricalPolicyNetwork(2, 2)
     gaussian = GaussianPolicyNetwork(2, 2)
     critic = StateValueNetwork(2)
+    critic_optimizer = torch.optim.SGD(critic.parameters(), lr=0.1)
     bounds = {"action_low": [-1.0, -1.0], "action_high": [1.0, 1.0]}
     for actor_network, critic_network, settings in (
         (categorical, StateValueNetwork(3), {}),
@@ -412,12 +478,15 @@ def test_constructor_rejects_invalid_settings() -> None:
         (gaussian, critic, {}),
         (gaussian, critic, {**bounds, "noise_beta": -1.0}),
         (gaussian, critic, {**bounds, "temporal_smoothness_coefficient": -0.1}),
+        (gaussian, [], bounds),
+        (gaussian, critic, {**bounds, "advantage_weights": [1.0]}),
+        (gaussian, [critic, critic], {**bounds, "advantage_weights": [1.0]}),
     ):
         with pytest.raises(ValueError):
             PPO(
                 actor_network,
                 torch.optim.SGD(actor_network.parameters(), lr=0.1),
                 critic_network,
-                torch.optim.SGD(critic_network.parameters(), lr=0.1),
+                critic_optimizer,
                 **settings,
             )

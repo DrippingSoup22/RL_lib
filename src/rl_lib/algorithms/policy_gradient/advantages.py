@@ -22,19 +22,33 @@ def generalized_advantage_estimates(
     ``terminated`` rows it is ignored, since nothing follows the end of the
     task. ``episode_ended`` marks termination or time limit: the next row
     belongs to a new episode, so its advantage is not carried back.
+
+    Several reward channels that share the same steps, each valued by a critic
+    of its own, are estimated at once: ``rewards``, ``values`` and
+    ``next_values`` then end with one more dimension, the channels, ``(T, W,
+    K)`` or ``(T, K)``. ``terminated`` and ``episode_ended`` keep the steps'
+    shape and apply to every channel.
     """
     if not 0 <= discount <= 1:
         raise ValueError("Discount must be in [0, 1]")
     if not 0 <= gae_lambda <= 1:
         raise ValueError("GAE lambda must be in [0, 1]")
-    inputs = (rewards, values, next_values, terminated, episode_ended)
-    if len({tensor.shape for tensor in inputs}) != 1:
-        raise ValueError("All inputs must have the same shape")
+    step_shape = terminated.shape
+    channel_dimensions = rewards.dim() - len(step_shape)
+    if (
+        len({tensor.shape for tensor in (rewards, values, next_values)}) != 1
+        or episode_ended.shape != step_shape
+        or rewards.shape[: len(step_shape)] != step_shape
+        or channel_dimensions not in (0, 1)
+    ):
+        raise ValueError("All inputs must have the same shape, but for the channels")
 
     advantages = torch.zeros_like(rewards)
     next_advantage = 0
-    terminated = terminated.float()
-    episode_ended = episode_ended.float()
+    # The episode ends apply alike to every channel.
+    end_shape = step_shape + (1,) * channel_dimensions
+    terminated = terminated.float().reshape(end_shape)
+    episode_ended = episode_ended.float().reshape(end_shape)
 
     # Backwards, so that each step's advantage can add the next step's one.
     for row in range(rewards.shape[0] - 1, -1, -1):

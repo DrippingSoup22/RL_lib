@@ -24,8 +24,9 @@ class PPOActionSample:
     ``environment_action`` is what the environment receives. ``policy_action``
     is what ``update`` re-evaluates later: the latent Gaussian sample for
     continuous actions, and the action itself for categorical ones.
-    ``log_probability`` is the sampling policy's log-probability of it and
-    ``value`` the critic's value of the observation, both ``(B,)``.
+    ``log_probability`` is the sampling policy's log-probability of it,
+    ``(B,)``, and ``value`` the critic's value of the observation, ``(B,)``,
+    or with several critics each one's, ``(B, K)``.
     """
 
     environment_action: torch.Tensor
@@ -38,13 +39,14 @@ class PPOActionSample:
 class PPOUpdateSummary:
     """How one update went.
 
-    The first five values are means over all minibatches of the update.
+    The first five values are means over all minibatches of the update; with
+    several critics, ``critic_loss`` is the sum of their losses.
     ``explained_variance`` describes the critic that collected the batch,
     before the update: ``1 - Var(return_targets - values) / Var(return_targets)``
     over the batch. It is 1 when the values predicted the return targets
     exactly, 0 when they explained none of their variation, negative when they
     did worse than predicting the mean, and NaN when every return target is the
-    same.
+    same. With several critics it is a tuple of each one's, in order.
     """
 
     actor_loss: float
@@ -52,7 +54,7 @@ class PPOUpdateSummary:
     entropy: float
     approximate_kl: float
     clip_fraction: float
-    explained_variance: float
+    explained_variance: float | tuple[float, ...]
 
 
 class PPO:
@@ -62,13 +64,23 @@ class PPO:
     moves the networks there before creating their optimizers and this PPO, and
     passes observations and stored data already on it. Nothing makes the CPU
     wait for the GPU, except reading the summary once at the end of an update.
+
+    **Several reward channels.** A task may pay its reward in several parts,
+    or channels, each valued by a critic of its own, as in the hybrid reward
+    architecture (van Seijen et al., NeurIPS 2017): a critic that predicts one
+    channel learns it from what that channel depends on, instead of seeing it
+    drowned in the others' variation. Rewards, values, advantages and return
+    targets then end with one column per channel, ``K``. The actor learns from
+    one advantage: each channel's, normalised over the batch on its own, times
+    its weight in ``advantage_weights``, added up, so that the weights set how
+    much each channel counts whatever its scale (docs/reward-channels.md).
     """
 
     def __init__(
         self,
         actor_network: CategoricalPolicyNetwork | GaussianPolicyNetwork,
         actor_optimizer: torch.optim.Optimizer,
-        critic_network: StateValueNetwork,
+        critic_network: StateValueNetwork | Sequence[StateValueNetwork],
         critic_optimizer: torch.optim.Optimizer,
         clip_ratio: float = 0.2,
         entropy_coefficient: float = 0.0,
@@ -81,6 +93,7 @@ class PPO:
         noise_sequence_steps: int = COLORED_NOISE_STEPS,
         exploration_matrix_steps: int = 1,
         temporal_smoothness_coefficient: float = 0.0,
+        advantage_weights: Sequence[float] | None = None,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
@@ -100,9 +113,29 @@ class PPO:
         that coefficient times the mean distance between the policy's mean
         actions in each state and in the state after it, so that ``update``
         then needs ``next_observations``.
+
+        ``critic_network`` may be a sequence of critics, one per reward
+        channel, with one weight each in ``advantage_weights`` (1 each by
+        default); a single critic takes no weights. ``critic_optimizer``
+        updates every critic's parameters.
         """
-        if actor_network.observation_size != critic_network.observation_size:
-            raise ValueError("Actor and critic networks must have the same input size")
+        several_critics = not isinstance(critic_network, StateValueNetwork)
+        critic_networks = list(critic_network) if several_critics else [critic_network]
+        if not critic_networks or any(
+            critic.observation_size != actor_network.observation_size
+            for critic in critic_networks
+        ):
+            raise ValueError(
+                "PPO needs one or more critics with the actor's input size"
+            )
+        if advantage_weights is not None and (
+            not several_critics
+            or len(advantage_weights) != len(critic_networks)
+            or not all(math.isfinite(weight) for weight in advantage_weights)
+        ):
+            raise ValueError(
+                "Advantage weights need several critics, one finite weight each"
+            )
         if not math.isfinite(clip_ratio) or not 0 < clip_ratio < 1:
             raise ValueError("Clip ratio must be finite and in (0, 1)")
         if not math.isfinite(entropy_coefficient) or entropy_coefficient < 0:
@@ -118,6 +151,8 @@ class PPO:
         self.actor_network = actor_network
         self.actor_optimizer = actor_optimizer
         self.critic_network = critic_network
+        self.critic_networks = critic_networks
+        self.several_critics = several_critics
         self.critic_optimizer = critic_optimizer
         self.clip_ratio = clip_ratio
         self.entropy_coefficient = entropy_coefficient
@@ -132,6 +167,13 @@ class PPO:
             self.generator.seed()
         else:
             self.generator.manual_seed(seed)
+        self.advantage_weights = torch.tensor(
+            [1.0] * len(critic_networks)
+            if advantage_weights is None
+            else advantage_weights,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
         self.policy: CategoricalPolicy | SquashedGaussianPolicy
         if isinstance(actor_network, CategoricalPolicyNetwork):
@@ -167,7 +209,7 @@ class PPO:
         changed policy.
         """
         with torch.no_grad():
-            value = self.critic_network(observations)
+            value = self._values(observations)
             if isinstance(self.policy, CategoricalPolicy):
                 action, log_probability = self.policy.sample(observations)
                 # A categorical action is re-evaluated exactly as it was sent.
@@ -204,9 +246,10 @@ class PPO:
             return environment_action
 
     def state_value(self, observations: torch.Tensor) -> torch.Tensor:
-        """The critic's value of each observation, ``(B,)``, for bootstrapping."""
+        """The critic's value of each observation, ``(B,)``, or with several
+        critics each one's, ``(B, K)``, for bootstrapping."""
         with torch.no_grad():
-            return self.critic_network(observations)
+            return self._values(observations)
 
     def update(
         self,
@@ -225,10 +268,12 @@ class PPO:
         The batch holds ``N`` samples on the networks' device: ``observations``
         ``(N, observation_size)``; ``policy_actions`` ``(N,)`` for categorical
         or ``(N, action_size)`` for continuous PPO, as stored from
-        ``PPOActionSample.policy_action``; and ``old_log_probabilities``,
-        ``advantages``, and ``return_targets``, each ``(N,)``. Advantages are
-        normalised once over the whole batch. Each epoch uses every sample
-        once, in a new random order, in minibatches of ``minibatch_size``.
+        ``PPOActionSample.policy_action``; ``old_log_probabilities``, ``(N,)``;
+        and ``advantages`` and ``return_targets``, ``(N,)``, or with several
+        critics ``(N, K)``. Each critic's advantages are normalised once over
+        the whole batch, then weighted and added up. Each epoch uses every
+        sample once, in a new random order, in minibatches of
+        ``minibatch_size``.
         With a temporal smoothness coefficient, ``next_observations`` holds the
         observation after each sample's, ``(N, observation_size)``.
         """
@@ -249,26 +294,38 @@ class PPO:
             )
         ):
             raise ValueError("Every input must hold the same nonzero number of samples")
+        critic_columns = (len(self.critic_networks),) if self.several_critics else ()
+        if not advantages.shape[1:] == return_targets.shape[1:] == critic_columns:
+            raise ValueError("Advantages and return targets need one column per critic")
 
-        # How well the critic that collected the batch predicted its returns.
-        # Return targets are advantages plus values, so the part the values
-        # left unexplained is the advantages, taken before normalisation.
-        return_target_variance = return_targets.var(correction=0)
-        explained_variance = torch.where(
-            return_target_variance > 0,
-            1 - advantages.var(correction=0) / return_target_variance,
+        # Every critic's values are a column of their own; a single critic's
+        # are the one column.
+        advantages = advantages.reshape(batch_size, -1)
+        return_targets = return_targets.reshape(batch_size, -1)
+
+        # How well the critics that collected the batch predicted their
+        # returns. Return targets are advantages plus values, so the part the
+        # values left unexplained is the advantages, taken before
+        # normalisation.
+        return_target_variances = return_targets.var(dim=0, correction=0)
+        explained_variances = torch.where(
+            return_target_variances > 0,
+            1 - advantages.var(dim=0, correction=0) / return_target_variances,
             math.nan,
         )
 
-        # Normalize once over the full batch, never independently per minibatch.
-        # Nearly constant advantages are kept as they are rather than divided
-        # by almost zero; torch.where makes that choice on the device.
-        advantage_standard_deviation = advantages.std(correction=0)
+        # Normalize once over the full batch, never independently per
+        # minibatch, each critic's column on its own. Nearly constant
+        # advantages are kept as they are rather than divided by almost zero;
+        # torch.where makes that choice on the device.
+        advantage_standard_deviations = advantages.std(dim=0, correction=0)
         advantages = torch.where(
-            advantage_standard_deviation > torch.finfo(advantages.dtype).eps,
-            (advantages - advantages.mean()) / advantage_standard_deviation,
+            advantage_standard_deviations > torch.finfo(advantages.dtype).eps,
+            (advantages - advantages.mean(dim=0)) / advantage_standard_deviations,
             advantages,
         )
+        # One advantage for the actor: each critic's, weighted, added up.
+        actor_advantages = advantages @ self.advantage_weights
 
         # The five measurements, added up over all minibatches on the device.
         measurement_totals = torch.zeros(5, device=self.device)
@@ -286,7 +343,7 @@ class PPO:
                     observations[minibatch_indices],
                     policy_actions[minibatch_indices],
                     old_log_probabilities[minibatch_indices],
-                    advantages[minibatch_indices],
+                    actor_advantages[minibatch_indices],
                     return_targets[minibatch_indices],
                     None
                     if next_observations is None
@@ -296,22 +353,31 @@ class PPO:
 
         # The only conversion to Python numbers: once, after all minibatches.
         summary = torch.cat(
-            (measurement_totals / minibatch_count, explained_variance.reshape(1))
+            (measurement_totals / minibatch_count, explained_variances)
+        ).tolist()
+        return PPOUpdateSummary(
+            *summary[:5],
+            explained_variance=tuple(summary[5:])
+            if self.several_critics
+            else summary[5],
         )
-        return PPOUpdateSummary(*summary.tolist())
 
     def state_dict(self) -> dict[str, Any]:
         """Everything training changes, for checkpoints.
 
-        Both networks, both optimizers, and the random generator. As with
-        PyTorch's own ``state_dict``, the tensors are the live ones: save the
-        result right away, or copy it. The settings are not included; restore
-        into a PPO built with the same settings and network sizes.
+        The networks (several critics as a list, in order), both optimizers,
+        and the random generator. As with PyTorch's own ``state_dict``, the
+        tensors are the live ones: save the result right away, or copy it. The
+        settings are not included; restore into a PPO built with the same
+        settings and network sizes.
         """
+        critic_states = [critic.state_dict() for critic in self.critic_networks]
         return {
             "actor_network": self.actor_network.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
-            "critic_network": self.critic_network.state_dict(),
+            "critic_network": critic_states
+            if self.several_critics
+            else critic_states[0],
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "generator": self.generator.get_state(),
             "generator_device_type": self.device.type,
@@ -326,7 +392,13 @@ class PPO:
         """
         self.actor_network.load_state_dict(state["actor_network"])
         self.actor_optimizer.load_state_dict(state["actor_optimizer"])
-        self.critic_network.load_state_dict(state["critic_network"])
+        critic_states = state["critic_network"]
+        if not self.several_critics:
+            critic_states = [critic_states]
+        for critic, critic_state in zip(
+            self.critic_networks, critic_states, strict=True
+        ):
+            critic.load_state_dict(critic_state)
         self.critic_optimizer.load_state_dict(state["critic_optimizer"])
         if state["generator_device_type"] == self.device.type:
             self.generator.set_state(state["generator"].cpu())
@@ -340,11 +412,14 @@ class PPO:
         return_targets: torch.Tensor,
         next_observations: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Take one clipped actor step and one critic step on a minibatch.
+        """Take one clipped actor step and one step of every critic on a
+        minibatch.
 
-        Returns the five minibatch measurements, in the order of the first five
-        fields of ``PPOUpdateSummary``, as one detached tensor, so that
-        ``update`` can add them up on the device without waiting for it.
+        ``advantages`` is the actor's, ``(B,)``; ``return_targets`` the
+        critics', ``(B, K)``, or ``(B,)`` for a single critic. Returns the five
+        minibatch measurements, in the order of the first five fields of
+        ``PPOUpdateSummary``, as one detached tensor, so that ``update`` can add
+        them up on the device without waiting for it.
         """
 
         # Re-evaluate the collected actions under the current, changing policy.
@@ -392,20 +467,36 @@ class PPO:
             )
 
         # Return targets were calculated before optimization and remain fixed.
-        predicted_values = self.critic_network(observations)
-        value_errors = return_targets - predicted_values
-        critic_loss = 0.5 * value_errors.square().mean()
+        # Each critic learns its column; their losses add up, and since they
+        # share no parameter, each gets only its own gradient.
+        value_errors = return_targets.reshape(
+            len(observations), -1
+        ) - self._critic_outputs(observations)
+        critic_loss = 0.5 * value_errors.square().mean(dim=0).sum()
 
-        # Actor and critic have independent networks and optimizers.
+        # Actor and critics have independent networks; each network's
+        # gradients are clipped on their own.
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
         actor_loss.backward()
         critic_loss.backward()
-        clip_gradients(self.actor_network.parameters(), self.max_gradient_norm)
-        clip_gradients(self.critic_network.parameters(), self.max_gradient_norm)
+        for network in (self.actor_network, *self.critic_networks):
+            clip_gradients(network.parameters(), self.max_gradient_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
         return torch.stack(
             (actor_loss, critic_loss, mean_entropy, approximate_kl, clip_fraction)
         ).detach()
+
+    def _critic_outputs(self, observations: torch.Tensor) -> torch.Tensor:
+        """Every critic's output for each observation, one column each,
+        ``(B, K)``."""
+        return torch.stack(
+            [critic(observations) for critic in self.critic_networks], dim=-1
+        )
+
+    def _values(self, observations: torch.Tensor) -> torch.Tensor:
+        """The critic's values, ``(B,)``, or every critic's, ``(B, K)``."""
+        values = self._critic_outputs(observations)
+        return values if self.several_critics else values[:, 0]
