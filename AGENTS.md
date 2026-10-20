@@ -19,7 +19,9 @@ The user's decision, 2026-10-14. `master` is the general library, kept
 pristine: it serves the Centipede's `main` branch, and every new branch starts
 from it. Changes a Centipede workspace needs go on an RL_lib branch with the
 workspace's name, never on `master`, unless the user decides a change is
-general. `oscillators` holds the Centipede oscillators' additions (noise
+general. By the user's decision of 2026-10-20, gSDE, value normalisation and
+several reward channels (one critic each) are general and live on `master`,
+written afresh without experiment code. `oscillators` holds the Centipede oscillators' additions (noise
 scales, several critics, action masks, a λ per step, a β per action
 component). The Centipede imports this folder, so both checkouts must be on
 matching branches; its launcher packs both.
