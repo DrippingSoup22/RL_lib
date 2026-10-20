@@ -23,7 +23,9 @@ state-dependent noise ([`docs/gsde.md`](docs/gsde.md)), and keep its actions
 smooth with CAPS's temporal term
 ([`docs/action-smoothness.md`](docs/action-smoothness.md)). PPO can learn a
 reward paid in several channels, with one critic each
-([`docs/reward-channels.md`](docs/reward-channels.md)). Its Gaussian
+([`docs/reward-channels.md`](docs/reward-channels.md)), and its critics can
+learn standardised returns
+([`docs/value-normalization.md`](docs/value-normalization.md)). Its Gaussian
 policy and state-value networks take ReLU or tanh hidden layers, and the
 policy network can start with its mean near zero for every observation, as
 Andrychowicz et al. (ICLR 2021) recommend.

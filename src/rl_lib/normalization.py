@@ -2,7 +2,8 @@
 
 An observation is a tensor whose last dimension holds its values; any leading
 dimensions form a batch, such as one observation per environment. The
-normaliser keeps its bounds and statistics as tensors on one device.
+normaliser keeps its bounds and statistics as tensors on one device. PPO also
+uses it to standardise the critics' return targets (value normalisation).
 """
 
 from __future__ import annotations
@@ -20,14 +21,25 @@ class ObservationNormalizer:
     ``none`` leaves observations unchanged. ``bounds`` maps each value's known
     range ``[low, high]`` to ``[-1, 1]``. ``running`` subtracts the mean and
     divides by the standard deviation of the observations seen so far, then
-    clips to plus or minus ``clip_limit``; those statistics change only when
-    ``normalize`` is asked to update them.
+    clips to plus or minus ``clip_limit`` (``math.inf`` clips nothing); those
+    statistics change only when ``normalize`` is asked to update them.
+    ``denormalize`` turns normalised values back, for instance a critic's
+    value learned on normalised returns.
 
     The running statistics are ``observation_count``, the ``mean``, and
     ``squared_deviation_sum``, the sum of every observation's squared distance
     from the mean, so that the variance is ``squared_deviation_sum /
     observation_count``. They are float64 to stay precise over millions of
     observations.
+
+    **Forgetting.** By default every observation ever added weighs the same,
+    so statistics that drift are followed ever more slowly. With a
+    ``horizon`` of H, before each batch of B observations is added, the old
+    statistics are made to count as at most H - 1 batches of B: their count
+    falls to (H - 1) B and their squared deviation sum with it, so that their
+    mean and variance stay the same. The merge then moves the mean a share
+    B / (H B) = 1/H of the way to the batch's, and the variance likewise: an
+    exponential moving average over about the last H batches.
     """
 
     MODES = ("none", "bounds", "running")
@@ -41,13 +53,15 @@ class ObservationNormalizer:
         high: torch.Tensor | None = None,
         epsilon: float = 1e-8,
         clip_limit: float = 10.0,
+        horizon: int = 0,
         device: torch.device | str = "cpu",
     ) -> None:
         """Check the settings once and start with empty statistics.
 
         ``low`` and ``high`` are required in ``bounds`` mode and rejected in the
         others. ``epsilon`` keeps the division defined for a value that never
-        varies.
+        varies. ``horizon``, in batches, makes ``running`` statistics forget
+        (0: never).
         """
         if observation_size <= 0:
             raise ValueError("Observation size must be positive")
@@ -55,13 +69,16 @@ class ObservationNormalizer:
             raise ValueError(f"mode must be one of {self.MODES}")
         if not math.isfinite(epsilon) or epsilon <= 0:
             raise ValueError("epsilon must be finite and positive")
-        if not math.isfinite(clip_limit) or clip_limit <= 0:
-            raise ValueError("clip_limit must be finite and positive")
+        if not clip_limit > 0:
+            raise ValueError("clip_limit must be positive")
+        if horizon < 0:
+            raise ValueError("horizon must be nonnegative")
 
         self.observation_size = observation_size
         self.mode = mode
         self.epsilon = float(epsilon)
         self.clip_limit = float(clip_limit)
+        self.horizon = int(horizon)
         self.device = torch.device(device)
 
         # Running statistics, used only in ``running`` mode.
@@ -131,6 +148,20 @@ class ObservationNormalizer:
         clipped = standardized.clamp(-self.clip_limit, self.clip_limit)
         return clipped.to(observations.dtype)
 
+    def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
+        """The inverse of ``normalize``, without its clipping, shape
+        ``(..., observation_size)``, in the dtype of ``normalized``."""
+        if self.mode == "bounds":
+            assert self.low is not None and self.high is not None
+            center = (self.high + self.low) / 2
+            half_range = (self.high - self.low) / 2
+            return normalized * half_range + center
+        if self.mode == "none" or self.observation_count == 0:
+            return normalized
+        variance = self.squared_deviation_sum / self.observation_count
+        restored = normalized.double() * torch.sqrt(variance + self.epsilon) + self.mean
+        return restored.to(normalized.dtype)
+
     def _add_to_statistics(self, observations: torch.Tensor) -> None:
         """Merge a batch of observations into the running statistics.
 
@@ -142,6 +173,13 @@ class ObservationNormalizer:
         """
         batch = observations.reshape(-1, self.observation_size).double()
         batch_count = batch.shape[0]
+        # Forgetting: the old statistics count as at most horizon - 1 batches.
+        kept = (self.horizon - 1) * batch_count
+        if self.horizon and self.observation_count > kept:
+            self.squared_deviation_sum = self.squared_deviation_sum * (
+                kept / self.observation_count
+            )
+            self.observation_count = kept
         batch_mean = batch.mean(dim=0)
         batch_squared_deviation_sum = (batch - batch_mean).square().sum(dim=0)
 
@@ -174,6 +212,7 @@ class ObservationNormalizer:
             "mode": self.mode,
             "epsilon": self.epsilon,
             "clip_limit": self.clip_limit,
+            "horizon": self.horizon,
             "observation_count": self.observation_count,
             "mean": cpu_copy(self.mean),
             "squared_deviation_sum": cpu_copy(self.squared_deviation_sum),
@@ -196,6 +235,8 @@ class ObservationNormalizer:
             high=state["high"],
             epsilon=float(state["epsilon"]),
             clip_limit=float(state["clip_limit"]),
+            # Saved before forgetting existed: never.
+            horizon=int(state.get("horizon", 0)),
             device=device,
         )
         normalizer.load_state_dict(state)

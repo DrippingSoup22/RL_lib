@@ -12,6 +12,7 @@ from rl_lib.networks import (
     GaussianPolicyNetwork,
     StateValueNetwork,
 )
+from rl_lib.normalization import ObservationNormalizer
 from rl_lib.optimization import clip_gradients, validate_max_gradient_norm
 from rl_lib.policies import CategoricalPolicy, SquashedGaussianPolicy
 from rl_lib.policies.neural import COLORED_NOISE_STEPS
@@ -40,7 +41,8 @@ class PPOUpdateSummary:
     """How one update went.
 
     The first five values are means over all minibatches of the update; with
-    several critics, ``critic_loss`` is the sum of their losses.
+    several critics, ``critic_loss`` is the sum of their losses, and with value
+    normalisation it is measured on the normalised return targets.
     ``explained_variance`` describes the critic that collected the batch,
     before the update: ``1 - Var(return_targets - values) / Var(return_targets)``
     over the batch. It is 1 when the values predicted the return targets
@@ -74,6 +76,15 @@ class PPO:
     one advantage: each channel's, normalised over the batch on its own, times
     its weight in ``advantage_weights``, added up, so that the weights set how
     much each channel counts whatever its scale (docs/reward-channels.md).
+
+    **Value normalisation.** With ``value_normalization``, every critic learns
+    its return targets standardised by their running mean and spread, and its
+    outputs are turned back into returns (Yu et al., MAPPO, NeurIPS 2022), so
+    that the units of a reward never set the scale a critic must learn. The
+    mean and spread weigh every target since the start alike, unless
+    ``value_normalization_horizon`` makes them forget: an exponential average
+    over about that many updates, so that the scale follows returns that grow
+    or shrink as the policy learns (docs/value-normalization.md).
     """
 
     def __init__(
@@ -94,6 +105,8 @@ class PPO:
         exploration_matrix_steps: int = 1,
         temporal_smoothness_coefficient: float = 0.0,
         advantage_weights: Sequence[float] | None = None,
+        value_normalization: bool = False,
+        value_normalization_horizon: int = 0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
 
@@ -172,6 +185,15 @@ class PPO:
             if advantage_weights is None
             else advantage_weights,
             dtype=torch.float32,
+            device=self.device,
+        )
+        # Each critic's return targets are standardised on their own; without
+        # value normalisation this normaliser leaves them as they are.
+        self.value_normalizer = ObservationNormalizer(
+            len(critic_networks),
+            "running" if value_normalization else "none",
+            clip_limit=math.inf,
+            horizon=value_normalization_horizon,
             device=self.device,
         )
 
@@ -314,6 +336,11 @@ class PPO:
             math.nan,
         )
 
+        # The statistics include this batch; the critics learn on their scale.
+        return_targets = self.value_normalizer.normalize(
+            return_targets, update_statistics=True
+        )
+
         # Normalize once over the full batch, never independently per
         # minibatch, each critic's column on its own. Nearly constant
         # advantages are kept as they are rather than divided by almost zero;
@@ -366,10 +393,10 @@ class PPO:
         """Everything training changes, for checkpoints.
 
         The networks (several critics as a list, in order), both optimizers,
-        and the random generator. As with PyTorch's own ``state_dict``, the
-        tensors are the live ones: save the result right away, or copy it. The
-        settings are not included; restore into a PPO built with the same
-        settings and network sizes.
+        the value normaliser, and the random generator. As with PyTorch's own
+        ``state_dict``, the tensors are the live ones: save the result right
+        away, or copy it. The settings are not included; restore into a PPO
+        built with the same settings and network sizes.
         """
         critic_states = [critic.state_dict() for critic in self.critic_networks]
         return {
@@ -379,6 +406,7 @@ class PPO:
             if self.several_critics
             else critic_states[0],
             "critic_optimizer": self.critic_optimizer.state_dict(),
+            "value_normalizer": self.value_normalizer.state_dict(),
             "generator": self.generator.get_state(),
             "generator_device_type": self.device.type,
         }
@@ -388,7 +416,8 @@ class PPO:
 
         The generator is restored only if it was saved on the same kind of
         device: CPU and CUDA generators draw different sequences, so on another
-        device it keeps the sequence this PPO was created with.
+        device it keeps the sequence this PPO was created with. A state saved
+        before value normalisation existed holds no value normaliser.
         """
         self.actor_network.load_state_dict(state["actor_network"])
         self.actor_optimizer.load_state_dict(state["actor_optimizer"])
@@ -400,6 +429,8 @@ class PPO:
         ):
             critic.load_state_dict(critic_state)
         self.critic_optimizer.load_state_dict(state["critic_optimizer"])
+        if "value_normalizer" in state:
+            self.value_normalizer.load_state_dict(state["value_normalizer"])
         if state["generator_device_type"] == self.device.type:
             self.generator.set_state(state["generator"].cpu())
 
@@ -416,7 +447,8 @@ class PPO:
         minibatch.
 
         ``advantages`` is the actor's, ``(B,)``; ``return_targets`` the
-        critics', ``(B, K)``, or ``(B,)`` for a single critic. Returns the five
+        critics', ``(B, K)``, or ``(B,)`` for a single critic, already
+        normalised. Returns the five
         minibatch measurements, in the order of the first five fields of
         ``PPOUpdateSummary``, as one detached tensor, so that ``update`` can add
         them up on the device without waiting for it.
@@ -497,6 +529,7 @@ class PPO:
         )
 
     def _values(self, observations: torch.Tensor) -> torch.Tensor:
-        """The critic's values, ``(B,)``, or every critic's, ``(B, K)``."""
-        values = self._critic_outputs(observations)
+        """The critic's values, ``(B,)``, or every critic's, ``(B, K)``, as
+        returns."""
+        values = self.value_normalizer.denormalize(self._critic_outputs(observations))
         return values if self.several_critics else values[:, 0]

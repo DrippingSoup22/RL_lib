@@ -361,8 +361,37 @@ def test_each_critic_learns_its_own_return_and_weighs_its_normalised_advantage(
     assert summary.explained_variance == pytest.approx((0.75, 1 - (200 / 3) / 54))
 
 
+def test_value_normalization_lets_a_critic_learn_returns_of_any_scale() -> None:
+    agent = make_agent(value_normalization=True)
+    observations = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    return_targets = torch.tensor([1000.0, 1010.0, 1020.0])
+
+    agent.update(
+        observations,
+        torch.zeros(3, dtype=torch.long),
+        torch.full((3,), LOG_HALF),
+        torch.zeros(3),
+        return_targets,
+        update_epochs=400,
+        minibatch_size=3,
+    )
+
+    # The linear critic learned the standardised targets, -1.22, 0 and 1.22,
+    # and its values come back as returns.
+    torch.testing.assert_close(
+        agent.state_value(observations), return_targets, atol=0.05, rtol=0.0
+    )
+
+
 @pytest.mark.parametrize(
-    "make", (make_agent, make_continuous_agent, make_two_critic_agent)
+    "make",
+    (
+        make_agent,
+        make_continuous_agent,
+        lambda **settings: make_two_critic_agent(
+            value_normalization=True, value_normalization_horizon=4, **settings
+        ),
+    ),
 )
 def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
     observations = torch.randn(16, 2, generator=torch.Generator().manual_seed(0))
