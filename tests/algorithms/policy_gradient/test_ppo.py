@@ -44,10 +44,17 @@ def make_agent(*, device="cpu", optimizer=torch.optim.SGD, seed=0, **settings) -
 
 
 def make_continuous_agent(
-    *, device="cpu", optimizer=torch.optim.SGD, seed=0, **settings
+    *,
+    device="cpu",
+    optimizer=torch.optim.SGD,
+    seed=0,
+    std_mode="state_dependent",
+    **settings,
 ) -> PPO:
     """Continuous PPO whose Gaussian mean equals the observation."""
-    actor_network = GaussianPolicyNetwork(2, 2, hidden_sizes=(), initial_std=0.5)
+    actor_network = GaussianPolicyNetwork(
+        2, 2, hidden_sizes=(), initial_std=0.5, std_mode=std_mode
+    )
     with torch.no_grad():
         actor_network.mean_network[0].weight.copy_(torch.eye(2))
         actor_network.mean_network[0].bias.zero_()
@@ -61,6 +68,13 @@ def make_continuous_agent(
         action_low=torch.tensor([-2.0, 0.0], device=device),
         action_high=torch.tensor([2.0, 10.0], device=device),
         **settings,
+    )
+
+
+def make_gsde_agent(**settings) -> PPO:
+    """Continuous PPO exploring with gSDE, each matrix held for two steps."""
+    return make_continuous_agent(
+        std_mode="gsde", exploration_matrix_steps=2, **settings
     )
 
 
@@ -78,7 +92,7 @@ def minibatch(agent, policy_actions, old_log_probabilities, advantages, targets)
     return dict(zip(names, measurements.tolist(), strict=True))
 
 
-@pytest.mark.parametrize("make", (make_agent, make_continuous_agent))
+@pytest.mark.parametrize("make", (make_agent, make_continuous_agent, make_gsde_agent))
 def test_sampling_records_what_learning_needs(make) -> None:
     agent = make()
     observations = torch.tensor([[0.0, 0.0], [1.0, -1.0], [0.5, 2.0]])
@@ -325,7 +339,7 @@ def test_a_restored_ppo_acts_and_learns_exactly_like_the_original(make) -> None:
 # PyTorch warns that its sync-debug mode may miss some waits; it catches those
 # that the distributions' checks and CPU-to-GPU copies cause.
 @pytest.mark.filterwarnings("ignore:Synchronization debug mode")
-@pytest.mark.parametrize("make", (make_agent, make_continuous_agent))
+@pytest.mark.parametrize("make", (make_agent, make_continuous_agent, make_gsde_agent))
 def test_acting_and_learning_never_make_the_cpu_wait_for_the_gpu(make) -> None:
     agent = make(device="cuda")
     observations = torch.randn(8, 2, device="cuda")

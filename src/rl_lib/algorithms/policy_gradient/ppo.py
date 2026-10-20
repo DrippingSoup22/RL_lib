@@ -79,6 +79,7 @@ class PPO:
         action_high: torch.Tensor | Sequence[float] | None = None,
         noise_beta: float = 0.0,
         noise_sequence_steps: int = COLORED_NOISE_STEPS,
+        exploration_matrix_steps: int = 1,
         temporal_smoothness_coefficient: float = 0.0,
     ) -> None:
         """Check the settings once and choose the policy from the actor network.
@@ -88,8 +89,11 @@ class PPO:
         shuffling minibatches. Without it the generator starts from a random
         seed. Continuous actors need ``action_low`` and ``action_high``, and may
         color their exploration noise with ``noise_beta``, drawn
-        ``noise_sequence_steps`` steps at a time (``SquashedGaussianPolicy``);
-        categorical actors must not get bounds or a noise color.
+        ``noise_sequence_steps`` steps at a time, or, with an actor whose
+        ``std_mode`` is ``"gsde"``, explore with state-dependent noise whose
+        exploration matrices last ``exploration_matrix_steps`` steps
+        (``SquashedGaussianPolicy``); categorical actors must not get bounds or
+        a noise color.
 
         ``temporal_smoothness_coefficient`` adds the temporal term of CAPS
         (Mysore et al., ICRA 2021) to the actor's loss, continuous actors only:
@@ -150,6 +154,7 @@ class PPO:
                 generator=self.generator,
                 noise_beta=noise_beta,
                 noise_sequence_steps=noise_sequence_steps,
+                exploration_matrix_steps=exploration_matrix_steps,
             )
         else:
             raise TypeError("Actor network must be categorical or Gaussian")

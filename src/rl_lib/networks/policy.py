@@ -55,6 +55,21 @@ class GaussianPolicyNetwork(nn.Module):
     near zero for every observation, so that the first actions differ only by
     their noise. Andrychowicz et al. (ICLR 2021) found that this start matters
     surprisingly much, and recommend 0.01.
+
+    ``std_mode`` sets where the standard deviation comes from: a network of
+    its own (``"state_dependent"``), one learned value per action component
+    (``"global"``), or generalized state-dependent exploration (``"gsde"``,
+    Raffin, Kober and Stulp, CoRL 2021; docs/gsde.md). With gSDE the noise is
+    a function of the state: the features ``z`` that the mean's last layer
+    reads, scaled to unit length, ``v = z / |z|``, times an exploration matrix
+    ``E`` that the policy keeps for some steps (``SquashedGaussianPolicy``).
+    Each entry ``E[i, j]`` is normal with its own learned spread ``S[i, j]``.
+    Action component ``j`` gets the noise ``sum_i v_i E[i, j]``, which for a
+    given state is normal with variance ``sum_i v_i^2 S[i, j]^2``: the
+    standard deviation ``forward`` returns. With every spread equal to ``s``
+    it is ``s`` in every state, so ``initial_std`` keeps its meaning. The
+    features count as data here: the spreads learn from the noise, the hidden
+    layers only through the mean.
     """
 
     def __init__(
@@ -77,8 +92,8 @@ class GaussianPolicyNetwork(nn.Module):
             raise ValueError("All hidden sizes must be greater than 0")
         if not math.isfinite(initial_std) or initial_std <= 0:
             raise ValueError("Initial std must be finite and greater than 0")
-        if std_mode not in ("state_dependent", "global"):
-            raise ValueError("std_mode must be 'state_dependent' or 'global'")
+        if std_mode not in ("state_dependent", "global", "gsde"):
+            raise ValueError("std_mode must be 'state_dependent', 'global' or 'gsde'")
         if not math.isfinite(mean_output_scale) or mean_output_scale <= 0:
             raise ValueError("Mean output scale must be finite and greater than 0")
         activation_class = hidden_activation(activation)
@@ -120,24 +135,64 @@ class GaussianPolicyNetwork(nn.Module):
             self.log_std_network = nn.Sequential(*log_std_layers)
             self.log_std = None
         else:
+            # gSDE has one spread per feature of the mean's last layer and
+            # action component; the global mode one per action component.
+            shape = (action_size,)
+            if std_mode == "gsde":
+                shape = (mean_input_size, action_size)
             self.log_std_network = None
-            self.log_std = nn.Parameter(
-                torch.full((action_size,), math.log(initial_std))
-            )
+            self.log_std = nn.Parameter(torch.full(shape, math.log(initial_std)))
 
     def forward(
         self,
         observation: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        mean = self.mean_network(observation)
-        # Bounding log standard deviation prevents numerical overflow or a
-        # nearly deterministic zero-variance Normal distribution.
+        mean, standard_deviation, _ = self.forward_with_features(observation)
+        return mean, standard_deviation
+
+    def forward_with_features(
+        self,
+        observation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """The mean and standard deviation, and with gSDE the unit-length
+        features its noise is made from (``None`` otherwise)."""
+        features = self.mean_network[:-1](observation)
+        mean = self.mean_network[-1](features)
+        if self.std_mode == "gsde":
+            unit_features = features.detach()
+            unit_features = unit_features / unit_features.norm(
+                dim=-1, keepdim=True
+            ).clamp(min=1e-6)
+            variance = unit_features.square() @ self._spreads().square()
+            # A small floor, as in Stable-Baselines3's gSDE, keeps the
+            # distribution proper in a state whose features are all zero.
+            return mean, torch.sqrt(variance + 1e-6), unit_features
         if self.log_std_network is not None:
             log_standard_deviation = self.log_std_network(observation)
         else:
             assert self.log_std is not None
             log_standard_deviation = self.log_std.expand_as(mean)
-        log_standard_deviation = torch.clamp(log_standard_deviation, min=-20.0, max=2.0)
-        standard_deviation = torch.exp(log_standard_deviation)
+        return mean, _bounded_exp(log_standard_deviation), None
 
-        return mean, standard_deviation
+    def state_dependent_noise(
+        self,
+        unit_features: torch.Tensor,
+        standard_matrices: torch.Tensor,
+    ) -> torch.Tensor:
+        """gSDE's noise, ``(..., actions)``, for ``unit_features``
+        ``(..., features)``: each row's exploration matrix is its standard
+        normal ``standard_matrices`` ``(..., features, actions)`` times the
+        spreads."""
+        return torch.einsum(
+            "...i,...ij->...j", unit_features, self._spreads() * standard_matrices
+        )
+
+    def _spreads(self) -> torch.Tensor:
+        assert self.log_std is not None
+        return _bounded_exp(self.log_std)
+
+
+def _bounded_exp(log_standard_deviation: torch.Tensor) -> torch.Tensor:
+    # Bounding log standard deviation prevents numerical overflow or a nearly
+    # deterministic zero-variance Normal distribution.
+    return torch.exp(torch.clamp(log_standard_deviation, min=-20.0, max=2.0))
